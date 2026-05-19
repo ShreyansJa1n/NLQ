@@ -12,7 +12,6 @@ pipeline, scores the result, and writes a Markdown report to
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 import time
@@ -28,7 +27,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from nl_db.config import load_settings  # noqa: E402
 from nl_db.llm.registry import build_provider  # noqa: E402
 from nl_db.pipeline import Pipeline  # noqa: E402
-from tests.fixtures.build_sample_db import SAMPLE_DB, build as build_sample_db  # noqa: E402
+from tests.fixtures.build_sample_db import SAMPLE_DB  # noqa: E402
+from tests.fixtures.build_sample_db import build as build_sample_db  # noqa: E402
 
 DATASET = Path(__file__).parent / "dataset.yaml"
 REPORTS_DIR = Path(__file__).parent / "reports"

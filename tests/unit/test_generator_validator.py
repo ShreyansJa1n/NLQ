@@ -5,7 +5,6 @@ import pytest
 from nl_db.generator import SQLExtractionError, extract_sql
 from nl_db.validator import SQLValidationError, validate_sql
 
-
 # extract_sql ---------------------------------------------------------------
 
 def test_extract_from_fenced_sql_block() -> None:

@@ -8,13 +8,13 @@ Natural language database querying. Privacy-first by design (on-device via Apple
 uv sync
 
 # Configure your provider (any one of these is enough)
-echo "ANTHROPIC_API_KEY=sk-..." >> .env       # for Claude
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env      # Claude
 # OR
-echo "OPENAI_API_KEY=sk-..." >> .env          # for GPT
+echo "OPENAI_API_KEY=sk-..." >> .env             # GPT
 # OR (for Ollama / Apple Intelligence shim / vLLM)
 export NL_DB_PROVIDER__NAME=openai_compatible
 export NL_DB_PROVIDER__BASE_URL=http://localhost:8080/v1
-export NL_DB_PROVIDER__MODEL=local-llama
+export NL_DB_PROVIDER__MODEL=apple-intelligence
 
 # Inspect the schema
 uv run nl-db schema --db path/to/your.db
@@ -30,7 +30,7 @@ Every query:
 
 1. Inspects the live schema (cached by file mtime)
 2. Generates SQL via your configured LLM
-3. Validates with `sqlglot` and auto-injects `LIMIT` for unbounded reads
+3. Validates with `sqlglot` and auto-injects `LIMIT` on unbounded reads
 4. Shows you the SQL **plus** a one-sentence plain-English paraphrase
 5. Waits for your confirmation (skip with `--no-confirm`)
 6. Executes and prints a table (or JSON with `--json`)
@@ -38,15 +38,43 @@ Every query:
 
 Writes (`INSERT`/`UPDATE`/`DELETE`/`DROP`/`ALTER`/`TRUNCATE`) are refused unless you pass `--allow-writes`.
 
+## MCP server
+
+`nl-db` also runs as an MCP stdio server, exposing four tools and a schema resource to any compatible client (Claude Desktop, Cursor, …):
+
+| Tool | Purpose |
+| --- | --- |
+| `list_tables` | Every user-created table in the DB |
+| `describe_schema(table_name)` | Columns, types, PKs, FKs for one table |
+| `query_database(question)` | Full NL → SQL → result pipeline |
+| `run_sql(sql)` | Execute raw SQL (gated by `--allow-writes`) |
+
+Resource: `db://schema/<table>` returns the same payload as `describe_schema`.
+
+Register with Claude Desktop by adding to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "nl-db": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/nl-db", "run", "nl-db-mcp", "--db", "/absolute/path/to/your.db"],
+      "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }
+    }
+  }
+}
+```
+
+Full setup walkthrough in [`docs/setup.md`](docs/setup.md).
+
 ## Configuration
 
 Precedence: env vars > `.env` > `~/.config/nl-db/config.toml` > defaults.
 
-A full `config.toml` looks like:
-
 ```toml
+# ~/.config/nl-db/config.toml
 [provider]
-name = "anthropic"            # "anthropic" | "openai" | "openai_compatible"
+name = "anthropic"                 # "anthropic" | "openai" | "openai_compatible"
 model = "claude-sonnet-4-6"
 # base_url = "http://localhost:8080/v1"   # required if name = "openai_compatible"
 
@@ -58,9 +86,33 @@ max_prompt_tokens = 8000
 
 API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` — never write them into `config.toml`.
 
-## Project state
+## Design
 
-This is an active build. See `plan.md` for the full design.
+See [`plan.md`](plan.md) for the full architecture and the `/Users/shreyansjain/.claude/plans/...` build plan.
+
+Key invariants:
+- **Schema-first prompting**: live schema is always injected — no stale snapshots.
+- **SQL transparency**: generated SQL is shown to the user (or the host LLM, via MCP) before execution.
+- **Read-only by default**: writes require an explicit flag.
+- **Provider-agnostic**: every LLM call goes through `LLMProvider` Protocol. Adding a new backend is one file.
+- **Eval-driven**: 30 NL→SQL pairs (`eval/dataset.yaml`) score every change.
+
+## Development
+
+```bash
+uv sync
+uv run pytest                          # 72 tests
+uv run ruff check
+uv run mypy src/
+
+# Build the sample database (gitignored, regenerable)
+uv run python tests/fixtures/build_sample_db.py
+
+# Run the eval harness
+uv run python -m eval.runner --limit 5
+```
+
+## Status
 
 - [x] Config layer (env / .env / TOML precedence)
 - [x] Schema extractor + cache (SQLite)
@@ -70,7 +122,14 @@ This is an active build. See `plan.md` for the full design.
 - [x] Query executor + table/JSON formatters
 - [x] Pipeline orchestrator
 - [x] CLI (`nl-db query`, `nl-db schema`, `nl-db config`)
-- [ ] Sample database fixture
-- [ ] 30-question eval harness
-- [ ] MCP stdio server
-- [ ] Setup docs (Apple Intelligence shim, Claude Desktop integration)
+- [x] Sample database fixture
+- [x] 30-question eval harness
+- [x] MCP stdio server (4 tools + schema resource)
+- [x] Setup docs
+
+### Deferred to post-v1
+
+- PostgreSQL + MySQL adapters (drop into the existing `SchemaExtractor` Protocol slot)
+- NL result summarizer (`--summarize`)
+- Multi-connection config manager
+- Apple Intelligence Swift HTTP shim (provided by a third-party project; nl-db is already compatible via the `openai_compatible` provider)

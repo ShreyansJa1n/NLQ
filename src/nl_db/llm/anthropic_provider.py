@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import anthropic
 
@@ -31,20 +31,30 @@ class AnthropicProvider:
             for m in messages
             if m.role != "system"
         ]
-        response = self._client.messages.create(
-            model=self._model,
-            max_tokens=max_output_tokens,
-            temperature=temperature,
-            system="\n\n".join(system_parts) if system_parts else anthropic.NOT_GIVEN,
-            messages=convo,
-        )
-        text = "".join(
-            block.text for block in response.content if getattr(block, "type", "") == "text"
-        )
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_output_tokens,
+            "temperature": temperature,
+            "messages": convo,
+        }
+        if system_parts:
+            kwargs["system"] = "\n\n".join(system_parts)
+
+        response = self._client.messages.create(**kwargs)
+
+        text_parts: list[str] = []
+        for block in response.content:
+            if getattr(block, "type", "") == "text":
+                text_parts.append(cast(str, getattr(block, "text", "")))
+        text = "".join(text_parts)
+
         usage = getattr(response, "usage", None)
         return ChatResult(
             text=text,
             input_tokens=getattr(usage, "input_tokens", None) if usage else None,
             output_tokens=getattr(usage, "output_tokens", None) if usage else None,
-            provider_meta={"model": self._model, "stop_reason": getattr(response, "stop_reason", None)},
+            provider_meta={
+                "model": self._model,
+                "stop_reason": getattr(response, "stop_reason", None),
+            },
         )

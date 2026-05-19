@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -64,7 +64,7 @@ def query(
         bool, typer.Option("--json", help="Print JSON result instead of a table.")
     ] = False,
     limit: Annotated[
-        Optional[int],
+        int | None,
         typer.Option(
             "--limit",
             help="Max rows returned. Overrides config; pass 0 to disable.",
@@ -126,10 +126,11 @@ def query(
 def schema_cmd(
     db: Annotated[Path, typer.Option("--db", exists=True)],
 ) -> None:
-    """Print the inferred schema for a database."""
-    pipe, _ = _build_pipeline(db, limit=None, paraphrase=False)
-    rendered = render_for_prompt(pipe.schema())
-    _console.print(Panel(rendered, title=str(db), border_style="cyan"))
+    """Print the inferred schema for a database. Does NOT call any LLM."""
+    from .schema.sqlite import SQLiteSchemaExtractor
+
+    schema = SQLiteSchemaExtractor.from_path(db).extract()
+    _console.print(Panel(render_for_prompt(schema), title=str(db), border_style="cyan"))
 
 
 @app.command(name="config")

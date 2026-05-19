@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.build_sample_db import SAMPLE_DB, build as build_sample_db
+from tests.fixtures.build_sample_db import SAMPLE_DB
+from tests.fixtures.build_sample_db import build as build_sample_db
 
 
 @pytest.fixture(scope="session")

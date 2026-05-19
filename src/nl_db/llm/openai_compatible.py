@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import openai
 
@@ -43,9 +43,13 @@ class OpenAICompatibleProvider:
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
     ) -> ChatResult:
+        wire = cast(
+            Any,
+            [{"role": m.role, "content": m.content} for m in messages],
+        )
         response = self._client.chat.completions.create(
             model=self._model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
+            messages=wire,
             temperature=temperature,
             max_tokens=max_output_tokens,
         )

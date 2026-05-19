@@ -64,7 +64,7 @@ class _TomlSource(PydanticBaseSettingsSource):
         return self._data
 
 
-def _make_settings_cls(toml_path: Path | None) -> type["Settings"]:
+def _make_settings_cls(toml_path: Path | None) -> type[Settings]:
     """Build a Settings subclass that knows where to look for the TOML file."""
 
     class _ConfiguredSettings(Settings):

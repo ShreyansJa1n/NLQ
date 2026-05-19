@@ -10,7 +10,6 @@ from eval.runner import (
     write_report,
 )
 
-
 DATASET_PATH = Path(__file__).resolve().parent.parent.parent / "eval" / "dataset.yaml"
 
 
