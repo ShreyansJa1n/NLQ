@@ -38,6 +38,17 @@ Every query:
 
 Writes (`INSERT`/`UPDATE`/`DELETE`/`DROP`/`ALTER`/`TRUNCATE`) are refused unless you pass `--allow-writes`.
 
+## Streamlit playground
+
+A session-scoped UI for experimentation — edit every config knob (provider, model, key, DB path, temperature, max tokens, paraphrase on/off, auto-LIMIT, few-shot count, …), inspect the schema, run NL queries, edit the generated SQL, and see results in a dataframe.
+
+```bash
+uv run nl-db-ui
+# opens http://localhost:8501
+```
+
+Nothing typed in the UI is written to disk — config edits are session-scoped. To persist, use `~/.config/nl-db/config.toml` or `.env`.
+
 ## MCP server
 
 `nl-db` also runs as an MCP stdio server, exposing four tools and a schema resource to any compatible client (Claude Desktop, Cursor, …):
@@ -125,6 +136,7 @@ uv run python -m eval.runner --limit 5
 - [x] Sample database fixture
 - [x] 30-question eval harness
 - [x] MCP stdio server (4 tools + schema resource)
+- [x] Streamlit playground UI (`nl-db-ui`)
 - [x] Setup docs
 
 ### Deferred to post-v1

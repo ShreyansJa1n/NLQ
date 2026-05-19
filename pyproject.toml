@@ -18,11 +18,14 @@ dependencies = [
     "mcp>=1.0",
     "pyyaml>=6.0",
     "tomli>=2.0; python_version < '3.11'",
+    "streamlit>=1.36",
+    "pandas>=2.2",
 ]
 
 [project.scripts]
 nl-db = "nl_db.cli:app"
 nl-db-mcp = "nl_db.mcp.server:main"
+nl-db-ui = "nl_db.web.launcher:main"
 
 [dependency-groups]
 dev = [
@@ -53,10 +56,10 @@ python_version = "3.11"
 strict = true
 warn_unused_ignores = true
 warn_return_any = true
-exclude = ["tests/", "eval/"]
+exclude = ["tests/", "eval/", "src/nl_db/web/"]
 
 [[tool.mypy.overrides]]
-module = ["sqlglot.*", "mcp.*"]
+module = ["sqlglot.*", "mcp.*", "streamlit.*", "pandas.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
