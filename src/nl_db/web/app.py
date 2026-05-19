@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
+import httpx
 import openai
 import pandas as pd
 import streamlit as st
@@ -39,6 +40,70 @@ from nl_db.pipeline import Pipeline, PipelineOutput
 from nl_db.schema.base import render_for_prompt
 from nl_db.schema.sqlite import SQLiteSchemaExtractor
 from nl_db.validator import SQLValidationError, validate_sql
+
+
+def _make_capturing_http_client(captures: list[dict[str, Any]]) -> httpx.Client:
+    """Build an httpx client whose request event hook appends every outgoing
+    request to `captures` so the UI can show the exact wire-level payload.
+    """
+
+    def _hook(request: httpx.Request) -> None:
+        body: Any
+        if request.content:
+            try:
+                body = json.loads(request.content)
+            except Exception:  # noqa: BLE001
+                body = request.content.decode("utf-8", errors="replace")
+        else:
+            body = None
+        captures.append(
+            {
+                "method": request.method,
+                "url": str(request.url),
+                "headers": {
+                    k: (
+                        "Bearer <redacted>"
+                        if k.lower() == "authorization"
+                        else ("<redacted>" if k.lower() == "x-api-key" else v)
+                    )
+                    for k, v in request.headers.items()
+                },
+                "body": body,
+            }
+        )
+
+    return httpx.Client(
+        event_hooks={"request": [_hook]},
+        timeout=httpx.Timeout(60.0),
+    )
+
+
+def _curl_equivalent(req: dict[str, Any]) -> str:
+    """Render a captured request as a copy-pasteable curl command."""
+    skip = {
+        "host",
+        "content-length",
+        "user-agent",
+        "accept-encoding",
+        "connection",
+        "accept",
+    }
+    lines = [f"curl -X {req['method']} '{req['url']}' \\"]
+    for k, v in req["headers"].items():
+        if k.lower() in skip:
+            continue
+        # show that auth was masked so the user knows to fill it in
+        lines.append(f"  -H '{k}: {v}' \\")
+    body = req["body"]
+    if body is not None:
+        body_str = (
+            json.dumps(body, indent=2) if isinstance(body, (dict, list)) else str(body)
+        )
+        lines.append(f"  -d '{body_str}'")
+    else:
+        # drop trailing backslash
+        lines[-1] = lines[-1].rstrip(" \\")
+    return "\n".join(lines)
 
 
 def _explain_llm_error(e: Exception) -> str:
@@ -124,6 +189,7 @@ def _init_state() -> None:
     st.session_state.history: list[HistoryEntry] = []
     st.session_state.last_output: PipelineOutput | None = None
     st.session_state.edited_sql: str | None = None
+    st.session_state.last_captures: list[dict[str, Any]] = []
 
 
 def _snapshot_settings_from_state() -> Settings:
@@ -172,37 +238,52 @@ _init_state()
 # Provider/pipeline construction from session state
 # ---------------------------------------------------------------------------
 
-def _build_provider() -> LLMProvider:
+def _build_provider() -> tuple[LLMProvider, list[dict[str, Any]]]:
+    """Build the configured provider plus a list that will capture every HTTP
+    request the provider sends. Captures are appended in order.
+    """
     name = st.session_state.provider_name
     model = st.session_state.model
     key = st.session_state.api_key
+    captures: list[dict[str, Any]] = []
+    http = _make_capturing_http_client(captures)
+
     if name == "anthropic":
         if not key:
             raise RuntimeError("Anthropic API key is required.")
-        return AnthropicProvider(model=model, api_key=key)
+        sdk = anthropic.Anthropic(api_key=key, http_client=http)
+        return AnthropicProvider(model=model, api_key=key, client=sdk), captures
     if name == "openai":
         if not key:
             raise RuntimeError("OpenAI API key is required.")
-        return OpenAIProvider(model=model, api_key=key)
+        sdk = openai.OpenAI(api_key=key, http_client=http)
+        return OpenAIProvider(model=model, api_key=key, client=sdk), captures
     if name == "openai_compatible":
         base_url = st.session_state.base_url
         if not base_url:
             raise RuntimeError("Base URL required for openai_compatible.")
-        return OpenAICompatibleProvider(
-            model=model, base_url=base_url, api_key=key or None
+        sdk = openai.OpenAI(
+            api_key=key or "not-needed", base_url=base_url, http_client=http
+        )
+        return (
+            OpenAICompatibleProvider(
+                model=model, base_url=base_url, api_key=key, client=sdk
+            ),
+            captures,
         )
     raise RuntimeError(f"Unknown provider: {name}")
 
 
-def _build_pipeline() -> Pipeline:
+def _build_pipeline() -> tuple[Pipeline, list[dict[str, Any]]]:
     db_path = Path(st.session_state.db_path).expanduser()
     if not db_path.exists():
         raise RuntimeError(f"Database not found: {db_path}")
     n_few_shot: int | None = (
         None if st.session_state.num_few_shot == -1 else st.session_state.num_few_shot
     )
-    return Pipeline(
-        provider=_build_provider(),
+    provider, captures = _build_provider()
+    pipeline = Pipeline(
+        provider=provider,
         db_path=db_path,
         max_rows=int(st.session_state.max_rows),
         timeout_s=float(st.session_state.timeout_s),
@@ -215,6 +296,7 @@ def _build_pipeline() -> Pipeline:
         auto_limit=bool(st.session_state.auto_limit),
         num_few_shot=n_few_shot,
     )
+    return pipeline, captures
 
 
 # ---------------------------------------------------------------------------
@@ -379,19 +461,16 @@ with tab_query:
             )
 
         if generate_clicked and question.strip():
+            st.session_state.last_captures = []
             with st.spinner("Calling LLM..."):
                 try:
-                    pipeline = _build_pipeline()
+                    pipeline, captures = _build_pipeline()
+                    st.session_state.last_captures = captures
                     schema = pipeline.schema()
                     from nl_db.generator import generate_sql
                     from nl_db.prompts.builder import build_sql_prompt
                     from nl_db.prompts.paraphrase import paraphrase_sql
 
-                    n_few_shot: int | None = (
-                        None
-                        if st.session_state.num_few_shot == -1
-                        else st.session_state.num_few_shot
-                    )
                     examples = pipeline._select_examples(schema)  # noqa: SLF001
                     prompt = build_sql_prompt(schema, question, examples=examples)
                     raw_sql = generate_sql(
@@ -465,6 +544,48 @@ with tab_query:
                 st.subheader("In plain English")
                 st.success(out["paraphrase"])
 
+            captures: list[dict[str, Any]] = st.session_state.get(
+                "last_captures", []
+            )
+            if captures:
+                with st.expander(
+                    f"🐞 Debug: {len(captures)} LLM API call(s) — request body + curl",
+                    expanded=False,
+                ):
+                    labels = [
+                        "SQL generation" if i == 0 else "Paraphrase"
+                        for i in range(len(captures))
+                    ]
+                    for i, (label, req) in enumerate(
+                        zip(labels, captures, strict=False)
+                    ):
+                        st.markdown(f"**Call {i + 1}: {label}**")
+                        st.code(f"{req['method']} {req['url']}", language="http")
+                        body_tab, headers_tab, curl_tab = st.tabs(
+                            ["Body", "Headers", "curl"]
+                        )
+                        with body_tab:
+                            if isinstance(req["body"], (dict, list)):
+                                st.code(
+                                    json.dumps(req["body"], indent=2),
+                                    language="json",
+                                )
+                            else:
+                                st.code(str(req["body"]))
+                        with headers_tab:
+                            st.code(
+                                "\n".join(
+                                    f"{k}: {v}" for k, v in req["headers"].items()
+                                )
+                            )
+                        with curl_tab:
+                            st.caption(
+                                "Authorization is redacted — fill in your key before running."
+                            )
+                            st.code(_curl_equivalent(req), language="bash")
+                        if i < len(captures) - 1:
+                            st.divider()
+
             run_col, _ = st.columns([1, 5])
             with run_col:
                 run_clicked = st.button(
@@ -476,7 +597,7 @@ with tab_query:
 
             if run_clicked:
                 try:
-                    pipeline = _build_pipeline()
+                    pipeline, _ = _build_pipeline()
                     sql_to_run = st.session_state.edited_sql or out["sql_final"]
                     # Re-validate edited SQL with the same allow_writes setting.
                     revalidation = validate_sql(
