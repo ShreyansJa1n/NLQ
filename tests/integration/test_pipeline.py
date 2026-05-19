@@ -228,3 +228,37 @@ def test_pipeline_answer_state_property(sample_db: Path) -> None:
     assert out.state == "ANSWER"
     assert isinstance(out.outcome, Answer)
     assert out.outcome.sql.upper().startswith("SELECT")
+
+
+def test_pipeline_history_appears_in_prompt(sample_db: Path) -> None:
+    from nl_db.conversation import Conversation, Turn
+    from nl_db.generator import Answer
+
+    provider = CannedProvider(
+        "```sql\nSELECT id FROM users\n```",
+        "Lists user ids.",
+    )
+    history = Conversation()
+    history.append(
+        Turn(
+            question="list users",
+            outcome=Answer(sql="SELECT name FROM users;"),
+            row_summary="name — 2 rows; first: Alice",
+        )
+    )
+    pipe = Pipeline(provider=provider, db_path=sample_db)
+    pipe.run("now their ids", history=history)
+    user_prompt = provider.calls[0][1].content
+    assert "Conversation so far:" in user_prompt
+    assert "Q: list users" in user_prompt
+    assert "name — 2 rows" in user_prompt
+
+
+def test_pipeline_no_history_no_conversation_block(sample_db: Path) -> None:
+    provider = CannedProvider(
+        "```sql\nSELECT id FROM users\n```",
+        "Lists user ids.",
+    )
+    Pipeline(provider=provider, db_path=sample_db).run("list ids")
+    user_prompt = provider.calls[0][1].content
+    assert "Conversation so far:" not in user_prompt

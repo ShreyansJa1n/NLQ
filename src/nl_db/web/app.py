@@ -834,19 +834,88 @@ with tab_query:
 # --- Schema tab ------------------------------------------------------------
 
 with tab_chat:
-    st.info(
-        "Multi-turn chat lands in the next commit. For now, use the **Query** "
-        "tab — when nl-db returns a CLARIFY response, you'll be prompted for a "
-        "follow-up there and the question gets re-run with your clarification "
-        "appended.",
-        icon="💬",
-    )
-    st.caption(
-        "Designed shape (preview): a chat-style transcript with the current "
-        "schema pinned at the top, prior turns above, and a single input box "
-        "at the bottom. CannotAnswer / Clarify outcomes naturally branch the "
-        "conversation."
-    )
+    if not st.session_state.db_path:
+        st.info("Set a SQLite path in the sidebar to start a chat.", icon="📁")
+    else:
+        if "chat_conversation" not in st.session_state:
+            from nl_db.conversation import Conversation
+
+            st.session_state.chat_conversation = Conversation()
+
+        st.caption(
+            "Multi-turn chat — the conversation history is passed back into "
+            "each prompt, so follow-ups like *'now group by region'* work."
+        )
+
+        col_reset, _ = st.columns([1, 5])
+        with col_reset:
+            if st.button("🗑️ Clear chat", use_container_width=True):
+                from nl_db.conversation import Conversation
+
+                st.session_state.chat_conversation = Conversation()
+                st.rerun()
+
+        # Render transcript
+        from nl_db.generator import Answer, CannotAnswer, Clarify
+
+        for turn in st.session_state.chat_conversation.turns:
+            with st.chat_message("user"):
+                st.write(turn.question)
+            with st.chat_message("assistant"):
+                if isinstance(turn.outcome, Answer):
+                    st.code(turn.outcome.sql, language="sql")
+                    if turn.row_summary:
+                        st.caption(turn.row_summary)
+                elif isinstance(turn.outcome, CannotAnswer):
+                    st.info(turn.outcome.reason, icon="🤷")
+                elif isinstance(turn.outcome, Clarify):
+                    st.warning(turn.outcome.question, icon="❓")
+
+        chat_question = st.chat_input("Ask a follow-up…")
+        if chat_question:
+            from nl_db.conversation import Turn, summarize_rows
+
+            try:
+                pipeline, _captures = _build_pipeline()
+                pout = pipeline.run(
+                    chat_question,
+                    allow_writes=False,
+                    confirm=lambda _sql, _para: True,  # auto-execute in chat
+                    history=st.session_state.chat_conversation,
+                )
+                row_summary: str | None = None
+                if isinstance(pout.outcome, Answer) and pout.result is not None:
+                    row_summary = summarize_rows(
+                        pout.result.columns, pout.result.rows
+                    )
+                st.session_state.chat_conversation.append(
+                    Turn(
+                        question=chat_question,
+                        outcome=pout.outcome,
+                        row_summary=row_summary,
+                    )
+                )
+                # Stash the latest result rows for inline display below the
+                # transcript on the next rerun.
+                if isinstance(pout.outcome, Answer) and pout.result is not None:
+                    st.session_state.chat_last_rows = {
+                        "columns": list(pout.result.columns),
+                        "rows": [list(r) for r in pout.result.rows],
+                        "truncated": pout.result.truncated,
+                    }
+                else:
+                    st.session_state.chat_last_rows = None
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(_explain_llm_error(e), icon="❌")
+
+        last_rows = st.session_state.get("chat_last_rows")
+        if last_rows:
+            st.subheader("Latest result")
+            df = pd.DataFrame(last_rows["rows"], columns=last_rows["columns"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            if last_rows["truncated"]:
+                st.caption("Result was truncated by max_rows.")
 
 
 with tab_schema:

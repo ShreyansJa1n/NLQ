@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .conversation import Conversation
 from .executor import QueryExecutor, QueryResult, SQLiteExecutor
 from .generator import (
     Answer,
@@ -133,10 +134,14 @@ class Pipeline:
         *,
         allow_writes: bool = False,
         confirm: ConfirmFn | None = None,
+        history: Conversation | None = None,
     ) -> PipelineOutput:
         schema = self.schema()
         prompt = build_sql_prompt(
-            schema, question, examples=self._select_examples(schema)
+            schema,
+            question,
+            examples=self._select_examples(schema),
+            history=history,
         )
         if exceeds_budget(prompt, self._max_prompt_tokens):
             # Soft warning only — the LLM may still handle it. The caller can

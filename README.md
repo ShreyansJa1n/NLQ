@@ -151,6 +151,9 @@ uv run python -m eval.runner --limit 5
 - [x] MCP stdio server (4 tools + schema resource)
 - [x] Streamlit playground UI (`nl-db-ui`)
 - [x] Setup docs
+- [x] Three-state generator output (`ANSWER` / `CANNOT_ANSWER` / `CLARIFY`)
+- [x] NL-first MCP surface (`describe_database`, top-level `db://schema` resource, `run_sql` behind `--expose-run-sql`)
+- [x] Multi-turn chat (Streamlit Chat tab + MCP `conversation_id`)
 
 ### Deferred to post-v1
 

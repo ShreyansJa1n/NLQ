@@ -48,7 +48,7 @@ Both surfaces wrap the same pipeline. SQL is an implementation detail, not an in
 4. ✅ **MCP surface narrows** — folded into #2 above.
 5. ✅ **Eval cases for the new states** — 3 `CANNOT_ANSWER` + 2 `CLARIFY` cases added; runner does state-match before row/SQL scoring; per-case Markdown report shows actual vs expected state.
 6. ✅ **UI three-state rendering + chat tab scaffold + CLI branching** — Streamlit Query tab renders an info banner for `CANNOT_ANSWER` (with `available_tables`) and a follow-up input for `CLARIFY` (Re-ask with clarification button). New Chat tab scaffolded as a placeholder for real multi-turn (commit #7). CLI `nl-db query` branches on outcome: `CANNOT_ANSWER` → yellow panel + exit 0; `CLARIFY` → interactive follow-up if a TTY is attached, otherwise exit 2.
-7. **Multi-turn chat** — conversation state in the pipeline; MCP `query_database` gains an optional `conversation_id` so host LLMs carry context across calls.
+7. ✅ **Multi-turn chat** — `src/nl_db/conversation.py` (Conversation, Turn, summarize_rows). `build_sql_prompt` and `Pipeline.run` accept an optional `history` parameter; history is rendered between the few-shot examples and the current question, bounded by `max_history_turns=5`. Streamlit Chat tab uses `st.chat_input` + `st.chat_message` for a real chat UX. MCP `query_database` accepts an optional `conversation_id`; the server keeps an in-memory `dict[str, Conversation]` for the process lifetime.
 
 ## Future work (post-roadmap, rough priority)
 

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install deps (+ dev group)
-uv run pytest                                    # full suite (118 tests, ~1s)
+uv run pytest                                    # full suite (132 tests, ~1s)
 uv run pytest tests/unit/test_schema.py          # one file
 uv run pytest -k "auto_limit"                    # by test name pattern
 uv run pytest tests/integration/test_mcp_server.py::test_query_database_end_to_end  # one test
@@ -45,7 +45,11 @@ uv run nl-db-ui                                                    # Streamlit p
 
 ### MCP server
 
-`src/nl_db/mcp/server.py` uses `FastMCP` (stdio transport). Default surface: four tools (`list_tables`, `describe_database`, `describe_schema`, `query_database`) and two Resources (`db://schema` for the full schema, `db://schema/<table>` per-table). A fifth tool `run_sql` is registered only when the server is started with `--expose-run-sql` (the NL-first design treats SQL execution as a power-user escape hatch, not the default surface). `--allow-writes` requires `--expose-run-sql` and exits with code 2 otherwise. `query_database` returns one of three response shapes keyed by a `"state"` field: `ANSWER` (with `sql`, `paraphrase`, `columns`, `rows`, ...), `CANNOT_ANSWER` (with `reason`, `available_tables`), or `CLARIFY` (with `question`). **Tool descriptions in `src/nl_db/mcp/tools.py` are product copy** — host LLMs read them to decide when and how to call each tool. Treat edits there like prompt engineering, not boilerplate. `run_sql`'s `readOnlyHint`/`destructiveHint` annotations flip based on the `--allow-writes` flag when the tool is registered.
+`src/nl_db/mcp/server.py` uses `FastMCP` (stdio transport). Default surface: four tools (`list_tables`, `describe_database`, `describe_schema`, `query_database`) and two Resources (`db://schema` for the full schema, `db://schema/<table>` per-table). A fifth tool `run_sql` is registered only when the server is started with `--expose-run-sql` (the NL-first design treats SQL execution as a power-user escape hatch, not the default surface). `--allow-writes` requires `--expose-run-sql` and exits with code 2 otherwise. `query_database` returns one of three response shapes keyed by a `"state"` field: `ANSWER` (with `sql`, `paraphrase`, `columns`, `rows`, ...), `CANNOT_ANSWER` (with `reason`, `available_tables`), or `CLARIFY` (with `question`). It also accepts an optional `conversation_id` string — calls sharing an id participate in a multi-turn conversation; the server holds a per-process `dict[str, Conversation]` keyed on that id (no cross-process persistence). **Tool descriptions in `src/nl_db/mcp/tools.py` are product copy** — host LLMs read them to decide when and how to call each tool. Treat edits there like prompt engineering, not boilerplate. `run_sql`'s `readOnlyHint`/`destructiveHint` annotations flip based on the `--allow-writes` flag when the tool is registered.
+
+### Conversation state
+
+`src/nl_db/conversation.py` defines `Turn` (frozen dataclass: `question`, `outcome`, optional one-line `row_summary`) and `Conversation` (mutable list of turns). `Conversation.to_prompt_context(max_turns=5)` renders recent turns as a compact text block; SQL is included verbatim, but result rows are NEVER dumped — only the summary line from `summarize_rows()` (columns + row count + truncated first row). `build_sql_prompt()` accepts optional `history: Conversation | None`, placed between few-shot examples and the current question. `Pipeline.run()` accepts the same parameter. The schema always comes first in the prompt; history is bounded so it can't crowd the schema out. Two consumers: the Streamlit Chat tab (per `st.session_state.chat_conversation`) and the MCP server's `conversation_id`-keyed dict.
 
 ### Config precedence
 

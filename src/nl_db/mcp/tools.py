@@ -72,9 +72,13 @@ read the `db://schema` resource) so you know what tables and columns are
 available.** nl-db will refuse questions that don't match the schema, so
 grounding upfront saves round-trips.
 
-Argument:
+Arguments:
 - question (string): a plain-English question, e.g.
   "How much did Alice spend on groceries last month?"
+- conversation_id (string, optional): pass the SAME id across calls in one
+  conversation to enable multi-turn (e.g. "show me sales last month" then
+  "now group by region"). Generate a UUID at conversation start, reuse for
+  every follow-up call. Omit for one-shot questions.
 
 Returns ONE of three response shapes, distinguished by the "state" field:
 

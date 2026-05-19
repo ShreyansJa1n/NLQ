@@ -28,6 +28,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..config import load_settings
+from ..conversation import Conversation, Turn, summarize_rows
 from ..generator import Answer, CannotAnswer, Clarify
 from ..llm.registry import build_provider
 from ..pipeline import Pipeline
@@ -150,14 +151,38 @@ def build_server(
     def describe_schema(table_name: str) -> dict[str, Any]:
         return _table_to_dict(pipeline.schema(), table_name)
 
+    # In-memory conversation store. Keyed by conversation_id; entries last for
+    # the lifetime of this server process. Host LLMs that want multi-turn
+    # should generate a UUID at conversation start and reuse it for follow-ups.
+    conversations: dict[str, Conversation] = {}
+
     @mcp.tool(
         name="query_database",
         description=descriptions.QUERY_DATABASE_DESC,
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
     )
-    def query_database(question: str) -> dict[str, Any]:
-        output = pipeline.run(question, allow_writes=False)
+    def query_database(
+        question: str,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        history = None
+        if conversation_id is not None:
+            history = conversations.setdefault(conversation_id, Conversation())
+
+        output = pipeline.run(question, allow_writes=False, history=history)
         outcome = output.outcome
+
+        # Record the turn into history if a conversation_id was supplied.
+        if history is not None:
+            row_summary: str | None = None
+            if isinstance(outcome, Answer) and output.result is not None:
+                row_summary = summarize_rows(
+                    output.result.columns, output.result.rows
+                )
+            history.append(
+                Turn(question=question, outcome=outcome, row_summary=row_summary)
+            )
+
         if isinstance(outcome, CannotAnswer):
             return {
                 "state": "CANNOT_ANSWER",

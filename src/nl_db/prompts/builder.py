@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..llm.provider import Message
 from ..schema.base import Schema, render_for_prompt
 from .examples import FewShotExample, few_shot_for
 from .system import system_prompt
+
+if TYPE_CHECKING:
+    from ..conversation import Conversation
 
 
 @dataclass
@@ -25,8 +29,16 @@ def build_sql_prompt(
     *,
     examples: tuple[FewShotExample, ...] | None = None,
     max_tokens_hint: int | None = None,
+    history: Conversation | None = None,
+    max_history_turns: int = 5,
 ) -> BuiltPrompt:
-    """Assemble system + schema + few-shot + question into a chat message list.
+    """Assemble system + schema + few-shot + (optional history) + question
+    into a chat message list.
+
+    `history`, when given, is rendered as a compact textual context block
+    BETWEEN the few-shot examples and the current question. Schema stays
+    primary in the prompt; history is bounded by `max_history_turns` so it
+    can't crowd the schema out.
 
     If `max_tokens_hint` is set and the assembled prompt exceeds it, the
     return still includes everything — the caller decides whether to warn,
@@ -43,6 +55,11 @@ def build_sql_prompt(
             ex_lines.append(f"Example {i} question: {ex.question}")
             ex_lines.append(f"Example {i} SQL:\n```sql\n{ex.sql}\n```")
         user_parts.append("\n\n".join(ex_lines))
+
+    if history is not None and not history.is_empty():
+        history_block = history.to_prompt_context(max_turns=max_history_turns)
+        user_parts.append(f"Conversation so far:\n{history_block}")
+
     user_parts.append(f"Question: {question}\n\nSQL:")
 
     user_content = "\n\n".join(user_parts)
