@@ -86,6 +86,10 @@ def query(
     ] = False,
 ) -> None:
     """Ask the database a question in plain English."""
+    from rich.prompt import Prompt
+
+    from .generator import Answer, CannotAnswer, Clarify
+
     effective_limit = None if limit == 0 else limit
     pipe, provider_name = _build_pipeline(db, effective_limit, paraphrase=not no_paraphrase)
 
@@ -109,10 +113,48 @@ def query(
             return True
         return Confirm.ask("Run this query?", default=True, console=_console)
 
+    # Allow one clarify→retry round-trip. If the model asks the same kind of
+    # follow-up twice, that's likely a prompt issue, not a user issue.
     output = pipe.run(question, allow_writes=allow_writes, confirm=_confirm)
+    if isinstance(output.outcome, Clarify) and not no_confirm:
+        _console.print(
+            Panel(
+                output.outcome.question,
+                title="[bold]Quick clarification[/bold]",
+                border_style="yellow",
+            )
+        )
+        clarification = Prompt.ask("Your answer", console=_console)
+        combined = f"{question}\n\nClarification: {clarification}"
+        output = pipe.run(combined, allow_writes=allow_writes, confirm=_confirm)
 
     log_path = log_pipeline_run(output, load_settings().log_dir, provider_name)
     _console.print(f"[dim]logged to {log_path}[/dim]")
+
+    if isinstance(output.outcome, CannotAnswer):
+        avail = ", ".join(output.outcome.available_tables) or "(none)"
+        _console.print(
+            Panel(
+                f"{output.outcome.reason}\n\n[dim]Available tables: {avail}[/dim]",
+                title="[bold]I can't answer that[/bold]",
+                border_style="yellow",
+            )
+        )
+        return  # successful refusal, not an error — exit 0
+
+    if isinstance(output.outcome, Clarify):
+        # Non-interactive (--no-confirm) or the user gave a clarification that
+        # still came back as Clarify — surface and exit nonzero.
+        _console.print(
+            Panel(
+                output.outcome.question,
+                title="[bold]Need more information[/bold]",
+                border_style="yellow",
+            )
+        )
+        raise typer.Exit(code=2)
+
+    assert isinstance(output.outcome, Answer)
 
     if output.skipped_reason:
         _console.print(f"[yellow]{output.skipped_reason}[/yellow]")

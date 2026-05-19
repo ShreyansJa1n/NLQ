@@ -501,8 +501,8 @@ st.caption(
     "every LLM call goes through the provider Protocol — no vendor lock-in"
 )
 
-tab_query, tab_schema, tab_history, tab_about = st.tabs(
-    ["Query", "Schema", "History", "About"]
+tab_query, tab_chat, tab_schema, tab_history, tab_about = st.tabs(
+    ["Query", "Chat", "Schema", "History", "About"]
 )
 
 
@@ -640,53 +640,49 @@ with tab_query:
             st.session_state.preview_only = False
             with st.spinner("Calling LLM..."):
                 try:
+                    from nl_db.generator import Answer, CannotAnswer, Clarify
+
                     pipeline, captures = _build_pipeline()
                     st.session_state.last_captures = captures
-                    schema = pipeline.schema()
-                    from nl_db.generator import generate_sql
-                    from nl_db.prompts.builder import build_sql_prompt
-                    from nl_db.prompts.paraphrase import paraphrase_sql
-
-                    examples = pipeline._select_examples(schema)  # noqa: SLF001
-                    prompt = build_sql_prompt(schema, question, examples=examples)
-                    raw_sql = generate_sql(
-                        pipeline._provider,  # noqa: SLF001
-                        prompt,
-                        temperature=float(st.session_state.temperature),
-                        max_output_tokens=int(st.session_state.max_output_tokens),
-                    )
-                    validation = validate_sql(
-                        raw_sql,
-                        dialect=schema.dialect,
+                    # confirm=lambda False: validates + paraphrases on the
+                    # Answer branch but skips execution. Run SQL is a separate
+                    # button (with edit-in-between), so we don't want to
+                    # execute eagerly here.
+                    pout = pipeline.run(
+                        question,
                         allow_writes=bool(st.session_state.allow_writes),
-                        max_rows=(
-                            int(st.session_state.max_rows)
-                            if st.session_state.auto_limit
-                            else None
-                        ),
+                        confirm=lambda _sql, _para: False,
                     )
-                    paraphrase = None
-                    if st.session_state.paraphrase_enabled:
-                        paraphrase = paraphrase_sql(
-                            pipeline._provider,  # noqa: SLF001
-                            validation.sql,
-                            temperature=float(
-                                st.session_state.paraphrase_temperature
-                            ),
-                            max_output_tokens=int(
-                                st.session_state.paraphrase_max_output_tokens
-                            ),
-                        )
-                    st.session_state.last_output = {
-                        "question": question,
-                        "sql_raw": raw_sql,
-                        "sql_final": validation.sql,
-                        "paraphrase": paraphrase,
-                        "is_destructive": validation.is_destructive,
-                        "auto_limit_applied": validation.auto_limit_applied,
-                        "approx_prompt_tokens": prompt.approx_tokens,
-                    }
-                    st.session_state.edited_sql = validation.sql
+                    if isinstance(pout.outcome, Answer):
+                        assert pout.sql_final is not None
+                        st.session_state.last_output = {
+                            "kind": "answer",
+                            "question": question,
+                            "sql_raw": pout.sql_raw,
+                            "sql_final": pout.sql_final,
+                            "paraphrase": pout.paraphrase,
+                            "is_destructive": pout.is_destructive,
+                            "auto_limit_applied": pout.auto_limit_applied,
+                            "approx_prompt_tokens": pout.prompt.approx_tokens,
+                        }
+                        st.session_state.edited_sql = pout.sql_final
+                    elif isinstance(pout.outcome, CannotAnswer):
+                        st.session_state.last_output = {
+                            "kind": "cannot_answer",
+                            "question": question,
+                            "reason": pout.outcome.reason,
+                            "available_tables": list(pout.outcome.available_tables),
+                            "approx_prompt_tokens": pout.prompt.approx_tokens,
+                        }
+                        st.session_state.edited_sql = None
+                    elif isinstance(pout.outcome, Clarify):
+                        st.session_state.last_output = {
+                            "kind": "clarify",
+                            "question": question,
+                            "clarify_question": pout.outcome.question,
+                            "approx_prompt_tokens": pout.prompt.approx_tokens,
+                        }
+                        st.session_state.edited_sql = None
                 except SQLValidationError as e:
                     st.error(f"Validation refused this SQL: {e}", icon="🛑")
                     st.session_state.last_output = None
@@ -695,7 +691,25 @@ with tab_query:
                     st.session_state.last_output = None
 
         out = st.session_state.last_output
-        if out:
+        if out and out.get("kind") == "cannot_answer":
+            st.info(out["reason"], icon="🤷")
+            tables = out["available_tables"] or ["(none)"]
+            st.caption("**Available tables in this database:** " + ", ".join(tables))
+        elif out and out.get("kind") == "clarify":
+            st.warning(out["clarify_question"], icon="❓")
+            clarification = st.text_input(
+                "Your answer", key="clarify_response_input"
+            )
+            if st.button("Re-ask with clarification", type="primary") and clarification.strip():
+                st.session_state.question_input = (
+                    f"{out['question']}\n\nClarification: {clarification}"
+                )
+                # Trigger generation on next rerun by setting a flag
+                # — simpler than calling _build_pipeline() inline here.
+                st.session_state.last_output = None
+                st.session_state.last_captures = []
+                st.rerun()
+        elif out and out.get("kind") == "answer":
             c1, c2, c3 = st.columns(3)
             c1.metric("Prompt tokens (approx)", out["approx_prompt_tokens"])
             c2.metric(
@@ -818,6 +832,22 @@ with tab_query:
 
 
 # --- Schema tab ------------------------------------------------------------
+
+with tab_chat:
+    st.info(
+        "Multi-turn chat lands in the next commit. For now, use the **Query** "
+        "tab — when nl-db returns a CLARIFY response, you'll be prompted for a "
+        "follow-up there and the question gets re-run with your clarification "
+        "appended.",
+        icon="💬",
+    )
+    st.caption(
+        "Designed shape (preview): a chat-style transcript with the current "
+        "schema pinned at the top, prior turns above, and a single input box "
+        "at the bottom. CannotAnswer / Clarify outcomes naturally branch the "
+        "conversation."
+    )
+
 
 with tab_schema:
     if not st.session_state.db_path:

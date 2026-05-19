@@ -27,9 +27,12 @@ def log_pipeline_run(output: PipelineOutput, log_dir: Path, provider_name: str) 
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{time.strftime('%Y%m%d')}.jsonl"
 
+    from .generator import CannotAnswer, Clarify
+
     record: dict[str, Any] = {
         "ts": time.time(),
         "provider": provider_name,
+        "state": output.state,
         "question": _redact(output.question, max_len=500),
         "sql_raw": output.sql_raw,
         "sql_final": output.sql_final,
@@ -42,6 +45,10 @@ def log_pipeline_run(output: PipelineOutput, log_dir: Path, provider_name: str) 
         "truncated": output.result.truncated if output.result else None,
         "pid": os.getpid(),
     }
+    if isinstance(output.outcome, CannotAnswer):
+        record["cannot_answer_reason"] = output.outcome.reason
+    elif isinstance(output.outcome, Clarify):
+        record["clarify_question"] = output.outcome.question
 
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install deps (+ dev group)
-uv run pytest                                    # full suite (116 tests, ~1s)
+uv run pytest                                    # full suite (118 tests, ~1s)
 uv run pytest tests/unit/test_schema.py          # one file
 uv run pytest -k "auto_limit"                    # by test name pattern
 uv run pytest tests/integration/test_mcp_server.py::test_query_database_end_to_end  # one test
@@ -57,7 +57,7 @@ Not built in this repo. nl-db consumes Apple Intelligence through *any* third-pa
 
 ### Streamlit playground
 
-`src/nl_db/web/app.py` is a UI on top of the same `Pipeline`. Every sidebar control maps to a Pipeline kwarg — temperature, max_output_tokens (SQL and paraphrase separately), auto_limit, num_few_shot, max_rows, timeout_s, allow_writes, paraphrase on/off. Sidebar edits are session-scoped (`st.session_state`) until the user clicks **Save to disk**, which writes `./nl-db.toml` via `save_settings()`; the API key is never persisted. The Query tab also has a **Preview only** button that builds the would-be HTTP request body without making the call, and a **Debug** expander that shows the actual wire request — both built on `_make_capturing_http_client()`, which is an `httpx.Client` with a request event hook injected into the openai/anthropic SDK via the existing `client=` constructor parameter. `web/` is excluded from mypy (Streamlit's mutable `session_state` pattern fights strict typing).
+`src/nl_db/web/app.py` is a UI on top of the same `Pipeline`. Five tabs: **Query**, **Chat** (scaffolded only — real multi-turn lands in roadmap item 7), **Schema**, **History**, **About**. Every sidebar control maps to a Pipeline kwarg — temperature, max_output_tokens (SQL and paraphrase separately), auto_limit, num_few_shot, max_rows, timeout_s, allow_writes, paraphrase on/off. Sidebar edits are session-scoped (`st.session_state`) until the user clicks **Save to disk**, which writes `./nl-db.toml` via `save_settings()`; the API key is never persisted. The Query tab calls `pipeline.run(..., confirm=lambda: False)` to get the three-state outcome without executing — Answer renders the SQL panel + paraphrase + a separate Run SQL button (so the user can edit), CannotAnswer renders an info banner with available tables, Clarify renders a yellow warning with a follow-up text input that re-runs with the clarification appended. The Query tab also has a **Preview only** button that builds the would-be HTTP request body without making the call, and a **Debug** expander that shows the actual wire request — both built on `_make_capturing_http_client()`, which is an `httpx.Client` with a request event hook injected into the openai/anthropic SDK via the existing `client=` constructor parameter. `web/` is excluded from mypy (Streamlit's mutable `session_state` pattern fights strict typing).
 
 ### Testing patterns
 

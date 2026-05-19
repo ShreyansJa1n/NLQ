@@ -143,6 +143,46 @@ def test_schema_command(
     assert "Table t" in result.output
 
 
+def test_query_command_cannot_answer(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch_provider: Any
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "nl_db.config.default_config_path", lambda: tmp_path / "missing.toml"
+    )
+    monkeypatch.setattr("nl_db.cli.load_settings", _load_with_logdir(tmp_path))
+    patch_provider(
+        "CANNOT_ANSWER: This database has no information about employees."
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["query", "how many employees?", "--db", str(db), "--no-confirm"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "I can't answer that" in result.output
+    assert "employees" in result.output.lower()
+    assert "Available tables" in result.output
+
+
+def test_query_command_clarify_non_interactive(
+    db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch_provider: Any
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setattr(
+        "nl_db.config.default_config_path", lambda: tmp_path / "missing.toml"
+    )
+    monkeypatch.setattr("nl_db.cli.load_settings", _load_with_logdir(tmp_path))
+    patch_provider("CLARIFY: Do you mean by id or by label?")
+    runner = CliRunner()
+    # --no-confirm skips the interactive clarification path → exit nonzero
+    result = runner.invoke(
+        cli.app, ["query", "show me", "--db", str(db), "--no-confirm"]
+    )
+    assert result.exit_code == 2
+    assert "Need more information" in result.output
+    assert "by id or by label" in result.output
+
+
 def test_config_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
     monkeypatch.setattr(
