@@ -1,0 +1,152 @@
+# 30 NL → SQL evaluation pairs, anchored to tests/fixtures/sample.db.
+# Calendar is anchored at 2026-05-15. "Current month" = May 2026.
+#
+# Scoring:
+#   - If `expected_rows` is set, the generated SQL must return exactly that set
+#     of rows (order-independent unless `ordered: true`).
+#   - If only `expected_sql_pattern` is set, regex must match the generated SQL.
+#   - `expected_row_count` is an optional sanity bound.
+
+- id: q01
+  nl: "List every user's name."
+  expected_rows: [["Alice"], ["Bob"], ["Carol"]]
+
+- id: q02
+  nl: "How many users are registered?"
+  expected_rows: [[3]]
+
+- id: q03
+  nl: "Show the 5 most recent transactions by date, returning id and occurred_on."
+  ordered: true
+  expected_row_count: 5
+
+- id: q04
+  nl: "What are the labels of the expense categories?"
+  expected_rows:
+    - ["groceries"]
+    - ["rent"]
+    - ["dining"]
+    - ["transport"]
+    - ["utilities"]
+    - ["entertainment"]
+
+- id: q05
+  nl: "Total amount spent (excluding income) by all users in cents — return a single number."
+  expected_sql_pattern: "(?is)SUM\\(.*amount_cents.*\\)"
+  expected_row_count: 1
+
+- id: q06
+  nl: "How much did Alice spend in total across all expense categories, in cents? Return just the number."
+  expected_sql_pattern: "(?is)\\b(Alice|alice@example\\.com)\\b.*SUM"
+  expected_row_count: 1
+
+- id: q07
+  nl: "List each user and their total spend in cents, highest first."
+  expected_sql_pattern: "(?is)GROUP\\s+BY.*ORDER\\s+BY.*DESC"
+  expected_row_count: 3
+
+- id: q08
+  nl: "Count of transactions per category label, ordered by count descending."
+  expected_sql_pattern: "(?is)GROUP\\s+BY.*ORDER\\s+BY.*DESC"
+
+- id: q09
+  nl: "Which transactions have no category assigned? Return their id and note."
+  expected_sql_pattern: "(?is)category_id\\s+IS\\s+NULL"
+  expected_row_count: 2
+
+- id: q10
+  nl: "Return the average transaction amount in cents."
+  expected_sql_pattern: "(?is)AVG\\(.*amount_cents.*\\)"
+  expected_row_count: 1
+
+- id: q11
+  nl: "List all transactions where the amount is negative (refunds), with their notes."
+  expected_sql_pattern: "(?is)amount_cents\\s*<\\s*0"
+  expected_row_count: 1
+
+- id: q12
+  nl: "Names of users who joined in 2025."
+  expected_rows: [["Alice"], ["Bob"]]
+
+- id: q13
+  nl: "Which vendor names belong to the 'groceries' category?"
+  expected_rows: [["Whole Foods"], ["Trader Joe's"]]
+
+- id: q14
+  nl: "Total spend per category label (expense categories only), highest first."
+  expected_sql_pattern: "(?is)kind\\s*=\\s*'expense'"
+
+- id: q15
+  nl: "What is the largest single transaction amount (in cents)?"
+  expected_sql_pattern: "(?is)MAX\\(.*amount_cents.*\\)"
+  expected_row_count: 1
+
+- id: q16
+  nl: "List user names alongside the total amount they received as income (in cents)."
+  expected_sql_pattern: "(?is)kind\\s*=\\s*'income'"
+  expected_row_count: 3
+
+- id: q17
+  nl: "Which categories have no transactions at all? Return their label."
+  expected_sql_pattern: "(?is)LEFT\\s+JOIN|NOT\\s+IN|NOT\\s+EXISTS"
+
+- id: q18
+  nl: "Number of distinct vendors each user has transacted with."
+  expected_sql_pattern: "(?is)COUNT\\(DISTINCT"
+  expected_row_count: 3
+
+- id: q19
+  nl: "Names of users who spent more than 2000 dollars in total on expenses. (amounts are in cents; ignore income rows)."
+  expected_sql_pattern: "(?is)HAVING.*200000"
+
+- id: q20
+  nl: "List the top 3 vendors by total transaction amount, with their totals in cents."
+  expected_sql_pattern: "(?is)LIMIT\\s+3"
+  ordered: true
+  expected_row_count: 3
+
+- id: q21
+  nl: "What is the average transaction amount per user?"
+  expected_sql_pattern: "(?is)AVG\\(.*amount.*\\).*GROUP\\s+BY"
+  expected_row_count: 3
+
+- id: q22
+  nl: "Which transactions in May 2026 belong to the 'rent' category? Return id and amount."
+  expected_sql_pattern: "(?is)rent"
+
+- id: q23
+  nl: "Total spend by Carol in the current month (May 2026), in cents."
+  expected_sql_pattern: "(?is)(Carol|carol@example\\.com)"
+  expected_row_count: 1
+
+- id: q24
+  nl: "List user emails of users who have at least one Netflix transaction."
+  expected_rows: [["alice@example.com"], ["carol@example.com"]]
+
+- id: q25
+  nl: "Number of transactions per month, formatted YYYY-MM. Most recent month first."
+  expected_sql_pattern: "(?is)strftime|substr"
+  ordered: true
+
+- id: q26
+  nl: "List vendors that have NULL category_id."
+  expected_rows: [["Unknown Vendor"]]
+
+- id: q27
+  nl: "What's the average amount of transactions tagged as 'dining'?"
+  expected_sql_pattern: "(?is)dining"
+  expected_row_count: 1
+
+- id: q28
+  nl: "Names of users with no income transactions."
+  expected_sql_pattern: "(?is)income"
+
+- id: q29
+  nl: "Total amount of transactions where the note contains the word 'rent'."
+  expected_sql_pattern: "(?is)note\\s+LIKE\\s+'%rent%'|INSTR\\(.*note"
+  expected_row_count: 1
+
+- id: q30
+  nl: "Show the user name and the date of their most recent transaction."
+  expected_sql_pattern: "(?is)MAX\\(occurred_on\\)|ROW_NUMBER"
+  expected_row_count: 3
