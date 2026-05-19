@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install deps (+ dev group)
-uv run pytest                                    # full suite (~72 tests, <1s)
+uv run pytest                                    # full suite (83 tests, <1s)
 uv run pytest tests/unit/test_schema.py          # one file
 uv run pytest -k "auto_limit"                    # by test name pattern
 uv run pytest tests/integration/test_mcp_server.py::test_query_database_end_to_end  # one test
@@ -24,13 +24,13 @@ uv run nl-db-ui                                  # Streamlit playground (http://
 
 ## Architecture
 
-`nl-db` is a Python NL-to-SQL pipeline that runs as both a CLI and an MCP stdio server. Three layered abstractions matter; the rest is mechanical:
+`nl-db` is a Python NL-to-SQL pipeline exposed through three surfaces — a CLI, an MCP stdio server, and a Streamlit playground — all built on the same core. Three layered abstractions matter; the rest is mechanical:
 
 1. **`LLMProvider` Protocol (`src/nl_db/llm/provider.py`).** Pipeline code is forbidden from importing `anthropic` or `openai` directly — every LLM call goes through this Protocol. `llm/registry.py::build_provider(settings)` is the only place vendor SDKs are touched. Adding a new backend (Apple Intelligence shim, Ollama, etc.) is one file in `llm/` plus one branch in the registry. New backends speaking the OpenAI wire format go through `openai_compatible.py` without code changes — they're a config-only addition.
 
 2. **`SchemaExtractor` Protocol (`src/nl_db/schema/base.py`).** SQLite is the only implementation in v1. `schema/cache.py` caches results keyed by `(path, mtime)` so repeated CLI/MCP calls don't re-introspect the DB. `render_for_prompt()` turns a `Schema` into the compact form injected into LLM prompts — token efficiency is intentional, don't expand it without measuring.
 
-3. **`Pipeline` (`src/nl_db/pipeline.py`).** Orchestrates: `schema()` → `build_sql_prompt` → `generate_sql` → `validate_sql` → optional `paraphrase_sql` → confirm callback → execute → `PipelineOutput`. The `ConfirmFn` callback is the seam between UX surfaces: the CLI plugs an interactive `rich.Confirm`, the MCP server returns SQL to the host model (auto-confirms), `--no-confirm` skips. The pipeline never runs SQL the validator hasn't blessed.
+3. **`Pipeline` (`src/nl_db/pipeline.py`).** Orchestrates: `schema()` → `build_sql_prompt` → `generate_sql` → `validate_sql` → optional `paraphrase_sql` → confirm callback → execute → `PipelineOutput`. The `ConfirmFn` callback is the seam between UX surfaces: the CLI plugs an interactive `rich.Confirm`, the MCP server returns SQL to the host model (auto-confirms), `--no-confirm` skips. The pipeline never runs SQL the validator hasn't blessed. Tuning knobs (`temperature`, `max_output_tokens`, `paraphrase_temperature`, `paraphrase_max_output_tokens`, `auto_limit`, `num_few_shot`) are constructor kwargs sourced from the `GenerationConfig` block in `Settings`.
 
 ### Invariants (do not break)
 
@@ -46,7 +46,7 @@ uv run nl-db-ui                                  # Streamlit playground (http://
 
 ### Config precedence
 
-Env vars > `.env` > `./nl-db.toml` (project-local, `NL_DB_CONFIG_FILE` override) > built-in defaults. Implemented via a custom `PydanticBaseSettingsSource` in `config.py` (the obvious approach of passing TOML data as kwargs to `Settings()` makes TOML beat env — which is wrong). API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`, never from TOML. `save_settings()` writes the non-secret blocks (provider/db/limits/generation) but explicitly never the API key. `nl-db schema` and `nl-db config` deliberately don't build a provider so they work without an API key.
+Env vars > `.env` > `./nl-db.toml` (project-local, `NL_DB_CONFIG_FILE` override) > built-in defaults. Implemented via a custom `PydanticBaseSettingsSource` in `config.py` (the obvious approach of passing TOML data as kwargs to `Settings()` makes TOML beat env — which is wrong). `Settings` has four blocks: `provider`, `db`, `limits`, `generation`. API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` — never from TOML. `save_settings()` writes the four non-secret blocks (provider sans `api_key`, db, limits, generation) but explicitly never the API key. `nl-db schema` and `nl-db config` deliberately don't build a provider so they work without an API key.
 
 ### Apple Intelligence path
 
@@ -54,7 +54,7 @@ Not built in this repo. nl-db consumes Apple Intelligence through *any* third-pa
 
 ### Streamlit playground
 
-`src/nl_db/web/app.py` is a session-scoped UI on top of the same `Pipeline`. Every sidebar control maps to a Pipeline kwarg — temperature, max_output_tokens (SQL and paraphrase separately), auto_limit, num_few_shot, max_rows, timeout_s, allow_writes, paraphrase on/off. Nothing the UI does is written to disk; config edits live only in `st.session_state`. `web/` is excluded from mypy (streamlit's mutable session_state pattern fights strict typing).
+`src/nl_db/web/app.py` is a UI on top of the same `Pipeline`. Every sidebar control maps to a Pipeline kwarg — temperature, max_output_tokens (SQL and paraphrase separately), auto_limit, num_few_shot, max_rows, timeout_s, allow_writes, paraphrase on/off. Sidebar edits are session-scoped (`st.session_state`) until the user clicks **Save to disk**, which writes `./nl-db.toml` via `save_settings()`; the API key is never persisted. The Query tab also has a **Preview only** button that builds the would-be HTTP request body without making the call, and a **Debug** expander that shows the actual wire request — both built on `_make_capturing_http_client()`, which is an `httpx.Client` with a request event hook injected into the openai/anthropic SDK via the existing `client=` constructor parameter. `web/` is excluded from mypy (Streamlit's mutable `session_state` pattern fights strict typing).
 
 ### Testing patterns
 
@@ -66,6 +66,16 @@ Not built in this repo. nl-db consumes Apple Intelligence through *any* third-pa
 
 Conventional commits (`feat(scope): ...`, `chore: ...`, `docs: ...`, `fix: ...`). Existing global git config is the authoritative author identity — do not set per-repo `user.name`/`user.email`, do not add `Co-Authored-By` trailers.
 
-## Deferred (slots already wired)
+## Roadmap and future work
 
-Postgres/MySQL adapters drop into the `SchemaExtractor` Protocol (`schema/base.py`) and the `executor.QueryExecutor` Protocol. NL result summarizer is a separate `--summarize` flag, second LLM call over result rows — not the same path as the existing paraphrase.
+`plan.md` is the authoritative roadmap. The next-iteration sequence is:
+
+1. Three-state generator output (`ANSWER` | `CANNOT_ANSWER(reason, available_tables)` | `CLARIFY(question)`) + NL-error wrapping
+2. MCP `describe_database()` tool + top-level `db://schema` Resource; tool descriptions nudge schema-first grounding
+3. `CANNOT_ANSWER` carries hints (available tables, suggested rephrase)
+4. MCP `run_sql` moves behind `--expose-run-sql` (default off); `query_database` becomes the canonical NL path
+5. Eval coverage for the new states
+6. UI three-state rendering + a Chat tab in the Streamlit playground
+7. Multi-turn chat with optional `conversation_id` on MCP `query_database`
+
+Future work beyond the roadmap (caching strategy, Postgres/MySQL adapters, schema enrichment, result summarizer, cost/observability, transport hardening) is detailed in `plan.md`. Postgres/MySQL adapters drop into the existing `SchemaExtractor` Protocol (`schema/base.py`) and the `executor.QueryExecutor` Protocol — slots are already wired.
