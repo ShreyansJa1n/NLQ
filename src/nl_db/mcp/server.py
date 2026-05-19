@@ -2,16 +2,19 @@
 
 Tools:
 - list_tables          → table names
-- describe_schema      → full schema for one table
-- query_database       → NL → SQL → result (read-only)
-- run_sql              → execute raw SQL (gated by --allow-writes)
+- describe_database    → full schema (one call, everything)
+- describe_schema      → schema for one specific table
+- query_database       → NL → outcome (Answer / CannotAnswer / Clarify)
+- run_sql              → execute raw SQL (only when --expose-run-sql is set)
 
-Resource:
-- db://schema/<table>  → same payload as describe_schema, as a Resource
+Resources:
+- db://schema          → full schema, same payload as describe_database
+- db://schema/<table>  → schema for one table, same as describe_schema
 
 Run:
     uv run nl-db-mcp --db path/to.db
-    uv run nl-db-mcp --db path/to.db --allow-writes
+    uv run nl-db-mcp --db path/to.db --expose-run-sql              # opt in to raw-SQL tool
+    uv run nl-db-mcp --db path/to.db --expose-run-sql --allow-writes
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..config import load_settings
+from ..generator import Answer, CannotAnswer, Clarify
 from ..llm.registry import build_provider
 from ..pipeline import Pipeline
 from ..schema.base import Schema
@@ -89,8 +93,18 @@ def _table_to_dict(schema: Schema, table_name: str) -> dict[str, Any]:
     }
 
 
-def build_server(db_path: Path, *, allow_writes: bool = False) -> FastMCP:
-    """Construct a FastMCP server bound to the given DB path."""
+def build_server(
+    db_path: Path,
+    *,
+    allow_writes: bool = False,
+    expose_run_sql: bool = False,
+) -> FastMCP:
+    """Construct a FastMCP server bound to the given DB path.
+
+    `run_sql` is registered ONLY when `expose_run_sql=True`. `allow_writes`
+    is meaningful only in combination with `expose_run_sql` — writes are
+    reachable only through `run_sql`.
+    """
     settings = load_settings()
     settings.db.path = db_path
     provider = build_provider(settings)
@@ -105,9 +119,10 @@ def build_server(db_path: Path, *, allow_writes: bool = False) -> FastMCP:
     mcp = FastMCP(
         name="nl-db",
         instructions=(
-            "Natural-language SQL gateway. Call list_tables / describe_schema "
-            "to ground yourself in the schema, then query_database with a "
-            "plain-English question, or run_sql if you already have the SQL."
+            "Natural-language gateway to a SQLite database. Call "
+            "describe_database() once at the start to ground yourself in the "
+            "schema, then send NL questions via query_database(). nl-db "
+            "writes and runs the SQL for you — don't translate to SQL yourself."
         ),
     )
 
@@ -118,6 +133,14 @@ def build_server(db_path: Path, *, allow_writes: bool = False) -> FastMCP:
     )
     def list_tables() -> dict[str, list[str]]:
         return {"tables": list(pipeline.schema().table_names())}
+
+    @mcp.tool(
+        name="describe_database",
+        description=descriptions.DESCRIBE_DATABASE_DESC,
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    def describe_database() -> dict[str, Any]:
+        return _schema_to_dict(pipeline.schema())
 
     @mcp.tool(
         name="describe_schema",
@@ -134,8 +157,23 @@ def build_server(db_path: Path, *, allow_writes: bool = False) -> FastMCP:
     )
     def query_database(question: str) -> dict[str, Any]:
         output = pipeline.run(question, allow_writes=False)
+        outcome = output.outcome
+        if isinstance(outcome, CannotAnswer):
+            return {
+                "state": "CANNOT_ANSWER",
+                "reason": outcome.reason,
+                "available_tables": list(outcome.available_tables),
+            }
+        if isinstance(outcome, Clarify):
+            return {
+                "state": "CLARIFY",
+                "question": outcome.question,
+            }
+        # Answer branch
+        assert isinstance(outcome, Answer)
         assert output.result is not None
         return {
+            "state": "ANSWER",
             "sql": output.sql_final,
             "paraphrase": output.paraphrase,
             "columns": list(output.result.columns),
@@ -145,30 +183,39 @@ def build_server(db_path: Path, *, allow_writes: bool = False) -> FastMCP:
             "auto_limit_applied": output.auto_limit_applied,
         }
 
-    @mcp.tool(
-        name="run_sql",
-        description=descriptions.RUN_SQL_DESC,
-        annotations=ToolAnnotations(
-            readOnlyHint=not allow_writes,
-            destructiveHint=allow_writes,
-        ),
-    )
-    def run_sql(sql: str) -> dict[str, Any]:
-        validation = validate_sql(
-            sql,
-            dialect=pipeline.schema().dialect,
-            allow_writes=allow_writes,
-            max_rows=None,
+    if expose_run_sql:
+        @mcp.tool(
+            name="run_sql",
+            description=descriptions.RUN_SQL_DESC,
+            annotations=ToolAnnotations(
+                readOnlyHint=not allow_writes,
+                destructiveHint=allow_writes,
+            ),
         )
-        result = pipeline._executor.execute(validation.sql)  # noqa: SLF001
-        return {
-            "sql": validation.sql,
-            "is_destructive": validation.is_destructive,
-            "columns": list(result.columns),
-            "rows": [list(row) for row in result.rows],
-            "row_count": result.row_count,
-            "truncated": result.truncated,
-        }
+        def run_sql(sql: str) -> dict[str, Any]:
+            validation = validate_sql(
+                sql,
+                dialect=pipeline.schema().dialect,
+                allow_writes=allow_writes,
+                max_rows=None,
+            )
+            result = pipeline._executor.execute(validation.sql)  # noqa: SLF001
+            return {
+                "sql": validation.sql,
+                "is_destructive": validation.is_destructive,
+                "columns": list(result.columns),
+                "rows": [list(row) for row in result.rows],
+                "row_count": result.row_count,
+                "truncated": result.truncated,
+            }
+
+    @mcp.resource(
+        "db://schema",
+        description=descriptions.FULL_SCHEMA_RESOURCE_DESC,
+        mime_type="application/json",
+    )
+    def full_schema_resource() -> str:
+        return json.dumps(_schema_to_dict(pipeline.schema()), indent=2)
 
     @mcp.resource(
         "db://schema/{table_name}",
@@ -187,9 +234,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--db", type=Path, required=True, help="SQLite database path.")
     parser.add_argument(
+        "--expose-run-sql",
+        action="store_true",
+        help=(
+            "Register the run_sql tool. Off by default — host LLMs should "
+            "use query_database (NL) instead of writing SQL themselves."
+        ),
+    )
+    parser.add_argument(
         "--allow-writes",
         action="store_true",
-        help="Permit INSERT/UPDATE/DELETE/DROP/ALTER via run_sql.",
+        help=(
+            "Permit INSERT/UPDATE/DELETE/DROP/ALTER via run_sql. Requires "
+            "--expose-run-sql since writes are only reachable through that tool."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -197,7 +255,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: database not found: {args.db}", flush=True)
         return 1
 
-    server = build_server(args.db, allow_writes=args.allow_writes)
+    if args.allow_writes and not args.expose_run_sql:
+        print(
+            "ERROR: --allow-writes requires --expose-run-sql "
+            "(writes are reachable only through the run_sql tool).",
+            flush=True,
+        )
+        return 2
+
+    server = build_server(
+        args.db,
+        allow_writes=args.allow_writes,
+        expose_run_sql=args.expose_run_sql,
+    )
     # FastMCP.run uses stdio by default; blocks until client disconnects.
     server.run(transport="stdio")
     return 0

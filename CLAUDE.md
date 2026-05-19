@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install deps (+ dev group)
-uv run pytest                                    # full suite (106 tests, ~1s)
+uv run pytest                                    # full suite (114 tests, ~1s)
 uv run pytest tests/unit/test_schema.py          # one file
 uv run pytest -k "auto_limit"                    # by test name pattern
 uv run pytest tests/integration/test_mcp_server.py::test_query_database_end_to_end  # one test
@@ -18,8 +18,9 @@ uv run python tests/fixtures/build_sample_db.py  # regenerate gitignored sample.
 uv run python -m eval.runner --limit 5           # smoke-run eval (needs API key)
 
 uv run nl-db query "..." --db <path>             # CLI entry
-uv run nl-db-mcp --db <path> [--allow-writes]    # MCP stdio server entry
-uv run nl-db-ui                                  # Streamlit playground (http://localhost:8501)
+uv run nl-db-mcp --db <path>                                       # MCP stdio server (NL-only surface)
+uv run nl-db-mcp --db <path> --expose-run-sql [--allow-writes]     # MCP with raw-SQL tool exposed
+uv run nl-db-ui                                                    # Streamlit playground (http://localhost:8501)
 ```
 
 ## Architecture
@@ -44,7 +45,7 @@ uv run nl-db-ui                                  # Streamlit playground (http://
 
 ### MCP server
 
-`src/nl_db/mcp/server.py` uses `FastMCP` (stdio transport). Four tools (`list_tables`, `describe_schema`, `query_database`, `run_sql`) plus a `db://schema/<table>` Resource. **Tool descriptions in `src/nl_db/mcp/tools.py` are product copy** — host LLMs read them to decide when and how to call each tool. Treat edits there like prompt engineering, not boilerplate. `run_sql`'s `readOnlyHint`/`destructiveHint` annotations flip based on the `--allow-writes` server flag.
+`src/nl_db/mcp/server.py` uses `FastMCP` (stdio transport). Default surface: four tools (`list_tables`, `describe_database`, `describe_schema`, `query_database`) and two Resources (`db://schema` for the full schema, `db://schema/<table>` per-table). A fifth tool `run_sql` is registered only when the server is started with `--expose-run-sql` (the NL-first design treats SQL execution as a power-user escape hatch, not the default surface). `--allow-writes` requires `--expose-run-sql` and exits with code 2 otherwise. `query_database` returns one of three response shapes keyed by a `"state"` field: `ANSWER` (with `sql`, `paraphrase`, `columns`, `rows`, ...), `CANNOT_ANSWER` (with `reason`, `available_tables`), or `CLARIFY` (with `question`). **Tool descriptions in `src/nl_db/mcp/tools.py` are product copy** — host LLMs read them to decide when and how to call each tool. Treat edits there like prompt engineering, not boilerplate. `run_sql`'s `readOnlyHint`/`destructiveHint` annotations flip based on the `--allow-writes` flag when the tool is registered.
 
 ### Config precedence
 

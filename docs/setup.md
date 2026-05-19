@@ -133,9 +133,9 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. You should see the four tools (`list_tables`, `describe_schema`, `query_database`, `run_sql`) and the `db://schema/<table>` resource available in the conversation.
+Restart Claude Desktop. You should see four tools — `list_tables`, `describe_database`, `describe_schema`, `query_database` — and two resources (`db://schema` for the full schema, `db://schema/<table>` per-table) in the conversation.
 
-To allow writes, add `"--allow-writes"` to the `args` list. Tool annotations will then advertise `destructiveHint: true` so Claude prompts before execution.
+The NL-only surface is intentional: Claude shouldn't write SQL when nl-db can do that for it. To expose the raw-SQL escape hatch (`run_sql`), add `"--expose-run-sql"` to the `args` list. To allow writes through `run_sql`, add **both** `"--expose-run-sql"` and `"--allow-writes"` (the latter requires the former — writes are reachable only through `run_sql`). Tool annotations will then advertise `destructiveHint: true` so Claude prompts before execution.
 
 ### Cursor
 
