@@ -57,18 +57,26 @@ echo "OPENAI_COMPATIBLE_API_KEY=not-needed" >> .env
 
 ### Persisting choices
 
-Anything you'd otherwise set in env vars can live in `~/.config/nl-db/config.toml`:
+Anything you'd otherwise set in env vars can live in `./nl-db.toml` (next to your project):
 
 ```toml
 [provider]
 name = "openai_compatible"
-model = "apple-intelligence"
+model = "apple.local"
 base_url = "http://localhost:8080/v1"
 
 [limits]
 max_rows = 500
 timeout_s = 8.0
+
+[generation]
+temperature = 0.0
+paraphrase = true
+auto_limit = true
+num_few_shot = -1
 ```
+
+Move it elsewhere with `NL_DB_CONFIG_FILE=/path/to/other.toml`. The Streamlit UI has a **Save to disk** button that writes this file for you.
 
 Env vars override TOML; TOML overrides built-in defaults.
 

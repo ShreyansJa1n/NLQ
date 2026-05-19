@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
+import tomli_w
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import (
     BaseSettings,
@@ -40,6 +41,18 @@ class ProviderConfig(BaseModel):
                 "(e.g. http://localhost:8080/v1)"
             )
         return self
+
+
+class GenerationConfig(BaseModel):
+    """Tuning knobs exposed by the Streamlit playground."""
+
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    max_output_tokens: int = Field(default=512, ge=32, le=8192)
+    paraphrase: bool = True
+    paraphrase_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    paraphrase_max_output_tokens: int = Field(default=128, ge=32, le=2048)
+    auto_limit: bool = True
+    num_few_shot: int = Field(default=-1, ge=-1, le=20)  # -1 = use builder default
 
 
 class _TomlSource(PydanticBaseSettingsSource):
@@ -100,6 +113,7 @@ class Settings(BaseSettings):
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
 
     log_dir: Path = Field(
         default_factory=lambda: Path.home() / ".local" / "share" / "nl-db" / "logs"
@@ -113,8 +127,20 @@ _API_KEY_ENV = {
 }
 
 
+CONFIG_FILENAME = "nl-db.toml"
+
+
 def default_config_path() -> Path:
-    return Path.home() / ".config" / "nl-db" / "config.toml"
+    """Resolve where the config file lives.
+
+    Precedence:
+    1. `NL_DB_CONFIG_FILE` env var (absolute path)
+    2. `./nl-db.toml` in the current working directory (project-local)
+    """
+    override = os.environ.get("NL_DB_CONFIG_FILE")
+    if override:
+        return Path(override).expanduser()
+    return Path.cwd() / CONFIG_FILENAME
 
 
 def load_settings(config_path: Path | None = None) -> Settings:
@@ -122,7 +148,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
 
     1. Environment variables (NL_DB_*)
     2. `.env` in CWD
-    3. Config TOML file (default: ~/.config/nl-db/config.toml)
+    3. Config TOML file (default: ./nl-db.toml, override: NL_DB_CONFIG_FILE)
     4. Built-in defaults
 
     Provider API keys are pulled from the provider-specific env var
@@ -138,6 +164,38 @@ def load_settings(config_path: Path | None = None) -> Settings:
             settings.provider.api_key = SecretStr(env_value)
 
     return settings
+
+
+def save_settings(settings: Settings, path: Path | None = None) -> Path:
+    """Persist non-secret settings to a TOML file.
+
+    NEVER writes the API key — that always stays in env / .env.
+    Returns the path that was written.
+    """
+    target = path or default_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    provider_block: dict[str, Any] = {
+        "name": settings.provider.name,
+        "model": settings.provider.model,
+    }
+    if settings.provider.base_url:
+        provider_block["base_url"] = settings.provider.base_url
+
+    db_block: dict[str, Any] = {"dialect": settings.db.dialect}
+    if settings.db.path is not None:
+        db_block["path"] = str(settings.db.path)
+
+    data: dict[str, Any] = {
+        "provider": provider_block,
+        "db": db_block,
+        "limits": settings.limits.model_dump(),
+        "generation": settings.generation.model_dump(),
+    }
+
+    with target.open("wb") as fh:
+        tomli_w.dump(data, fh)
+    return target
 
 
 def require_api_key(settings: Settings) -> str:

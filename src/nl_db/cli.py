@@ -28,20 +28,27 @@ _console = Console()
 def _build_pipeline(
     db: Path,
     limit: int | None,
-    paraphrase: bool = True,
+    paraphrase: bool | None = None,
 ) -> tuple[Pipeline, str]:
     settings = load_settings()
     settings.db.path = db
     if limit is not None:
         settings.limits.max_rows = limit
     provider = build_provider(settings)
+    gen = settings.generation
     pipe = Pipeline(
         provider=provider,
         db_path=db,
         max_rows=settings.limits.max_rows,
         timeout_s=settings.limits.timeout_s,
         max_prompt_tokens=settings.limits.max_prompt_tokens,
-        paraphrase=paraphrase,
+        paraphrase=gen.paraphrase if paraphrase is None else paraphrase,
+        temperature=gen.temperature,
+        max_output_tokens=gen.max_output_tokens,
+        paraphrase_temperature=gen.paraphrase_temperature,
+        paraphrase_max_output_tokens=gen.paraphrase_max_output_tokens,
+        auto_limit=gen.auto_limit,
+        num_few_shot=None if gen.num_few_shot == -1 else gen.num_few_shot,
     )
     return pipe, provider.name
 
@@ -136,18 +143,28 @@ def schema_cmd(
 @app.command(name="config")
 def config_cmd() -> None:
     """Print the active configuration (with secrets masked)."""
+    from .config import default_config_path
+
     s = load_settings()
+    cfg_path = default_config_path()
+    cfg_present = "exists" if cfg_path.exists() else "not present (using defaults)"
     masked_key = "set" if s.provider.api_key else "unset"
+    g = s.generation
     _console.print(
         Panel(
-            f"[bold]provider[/bold]: {s.provider.name}\n"
-            f"[bold]model[/bold]:    {s.provider.model}\n"
-            f"[bold]base_url[/bold]: {s.provider.base_url or '(default)'}\n"
-            f"[bold]api_key[/bold]:  {masked_key}\n"
-            f"[bold]db.path[/bold]:  {s.db.path or '(unset)'}\n"
-            f"[bold]limits[/bold]:   max_rows={s.limits.max_rows}, "
-            f"timeout_s={s.limits.timeout_s}\n"
-            f"[bold]log_dir[/bold]:  {s.log_dir}",
+            f"[bold]config file[/bold]: {cfg_path}  [dim]({cfg_present})[/dim]\n"
+            f"\n"
+            f"[bold]provider[/bold]:   {s.provider.name}\n"
+            f"[bold]model[/bold]:      {s.provider.model}\n"
+            f"[bold]base_url[/bold]:   {s.provider.base_url or '(default)'}\n"
+            f"[bold]api_key[/bold]:    {masked_key}\n"
+            f"[bold]db.path[/bold]:    {s.db.path or '(unset)'}\n"
+            f"[bold]limits[/bold]:     max_rows={s.limits.max_rows}, "
+            f"timeout_s={s.limits.timeout_s}, max_prompt_tokens={s.limits.max_prompt_tokens}\n"
+            f"[bold]generation[/bold]: temperature={g.temperature}, max_tokens={g.max_output_tokens}, "
+            f"paraphrase={g.paraphrase} (t={g.paraphrase_temperature}, tok={g.paraphrase_max_output_tokens}), "
+            f"auto_limit={g.auto_limit}, few_shot={g.num_few_shot}\n"
+            f"[bold]log_dir[/bold]:    {s.log_dir}",
             title="[bold]nl-db config[/bold]",
             border_style="cyan",
         )

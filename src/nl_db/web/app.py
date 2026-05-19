@@ -22,7 +22,15 @@ import openai
 import pandas as pd
 import streamlit as st
 
-from nl_db.config import Settings, load_settings
+from nl_db.config import (
+    GenerationConfig,
+    LimitsConfig,
+    ProviderConfig,
+    Settings,
+    default_config_path,
+    load_settings,
+    save_settings,
+)
 from nl_db.llm.anthropic_provider import AnthropicProvider
 from nl_db.llm.openai_compatible import OpenAICompatibleProvider
 from nl_db.llm.openai_provider import OpenAIProvider
@@ -93,6 +101,7 @@ def _init_state() -> None:
     if "initialized" in st.session_state:
         return
     base = load_settings()
+    g = base.generation
     st.session_state.initialized = True
     st.session_state.provider_name = base.provider.name
     st.session_state.model = base.provider.model
@@ -100,21 +109,60 @@ def _init_state() -> None:
     st.session_state.api_key = (
         base.provider.api_key.get_secret_value() if base.provider.api_key else ""
     )
-    st.session_state.db_path = ""
+    st.session_state.db_path = str(base.db.path) if base.db.path else ""
     st.session_state.max_rows = base.limits.max_rows
     st.session_state.timeout_s = base.limits.timeout_s
     st.session_state.max_prompt_tokens = base.limits.max_prompt_tokens
-    st.session_state.temperature = 0.0
-    st.session_state.max_output_tokens = 512
-    st.session_state.paraphrase_enabled = True
-    st.session_state.paraphrase_temperature = 0.0
-    st.session_state.paraphrase_max_output_tokens = 128
-    st.session_state.auto_limit = True
-    st.session_state.num_few_shot = -1  # -1 sentinel = use default (all)
+    st.session_state.temperature = g.temperature
+    st.session_state.max_output_tokens = g.max_output_tokens
+    st.session_state.paraphrase_enabled = g.paraphrase
+    st.session_state.paraphrase_temperature = g.paraphrase_temperature
+    st.session_state.paraphrase_max_output_tokens = g.paraphrase_max_output_tokens
+    st.session_state.auto_limit = g.auto_limit
+    st.session_state.num_few_shot = g.num_few_shot
     st.session_state.allow_writes = False
     st.session_state.history: list[HistoryEntry] = []
     st.session_state.last_output: PipelineOutput | None = None
     st.session_state.edited_sql: str | None = None
+
+
+def _snapshot_settings_from_state() -> Settings:
+    """Build a Settings object from current sidebar state, ready to save.
+
+    API key is deliberately NOT included — secrets stay in env / .env.
+    """
+    provider = ProviderConfig(
+        name=st.session_state.provider_name,
+        model=st.session_state.model,
+        base_url=st.session_state.base_url or None,
+    )
+    limits = LimitsConfig(
+        max_rows=int(st.session_state.max_rows),
+        timeout_s=float(st.session_state.timeout_s),
+        max_prompt_tokens=int(st.session_state.max_prompt_tokens),
+    )
+    generation = GenerationConfig(
+        temperature=float(st.session_state.temperature),
+        max_output_tokens=int(st.session_state.max_output_tokens),
+        paraphrase=bool(st.session_state.paraphrase_enabled),
+        paraphrase_temperature=float(st.session_state.paraphrase_temperature),
+        paraphrase_max_output_tokens=int(st.session_state.paraphrase_max_output_tokens),
+        auto_limit=bool(st.session_state.auto_limit),
+        num_few_shot=int(st.session_state.num_few_shot),
+    )
+    snapshot = Settings.model_construct(
+        provider=provider,
+        db=Settings().db.model_copy(
+            update={
+                "path": Path(st.session_state.db_path).expanduser()
+                if st.session_state.db_path
+                else None
+            }
+        ),
+        limits=limits,
+        generation=generation,
+    )
+    return snapshot
 
 
 _init_state()
@@ -175,7 +223,25 @@ def _build_pipeline() -> Pipeline:
 
 with st.sidebar:
     st.title("nl-db")
-    st.caption("session-scoped config — nothing is written to disk")
+    cfg_path = default_config_path()
+    st.caption(
+        f"Edits are session-scoped. Click **Save to disk** to persist to "
+        f"`{cfg_path}` (API key never written)."
+    )
+
+    save_col, reload_col = st.columns(2)
+    with save_col:
+        if st.button("💾 Save to disk", use_container_width=True):
+            try:
+                written = save_settings(_snapshot_settings_from_state(), cfg_path)
+                st.success(f"Wrote {written}")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"{type(e).__name__}: {e}")
+    with reload_col:
+        if st.button("↻ Reload from disk", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
 
     with st.expander("Database", expanded=True):
         st.text_input(

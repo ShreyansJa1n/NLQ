@@ -80,10 +80,12 @@ Full setup walkthrough in [`docs/setup.md`](docs/setup.md).
 
 ## Configuration
 
-Precedence: env vars > `.env` > `~/.config/nl-db/config.toml` > defaults.
+Precedence: env vars > `.env` > `./nl-db.toml` (project-local) > defaults.
+
+The config file is **project-local** — it lives next to your code at `./nl-db.toml`. Override the location via `NL_DB_CONFIG_FILE=path/to/file.toml`.
 
 ```toml
-# ~/.config/nl-db/config.toml
+# ./nl-db.toml
 [provider]
 name = "anthropic"                 # "anthropic" | "openai" | "openai_compatible"
 model = "claude-sonnet-4-6"
@@ -93,7 +95,18 @@ model = "claude-sonnet-4-6"
 max_rows = 1000
 timeout_s = 10.0
 max_prompt_tokens = 8000
+
+[generation]
+temperature = 0.0
+max_output_tokens = 512
+paraphrase = true
+paraphrase_temperature = 0.0
+paraphrase_max_output_tokens = 128
+auto_limit = true
+num_few_shot = -1                  # -1 = all curated examples; 0 = none
 ```
+
+The Streamlit UI has a **Save to disk** button in the sidebar that writes the current settings to `./nl-db.toml`. API keys are never written — secrets always stay in `.env` or env vars. `nl-db.toml` is gitignored by default (uncomment in `.gitignore` to share team config).
 
 API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` — never write them into `config.toml`.
 

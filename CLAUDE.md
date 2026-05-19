@@ -46,7 +46,7 @@ uv run nl-db-ui                                  # Streamlit playground (http://
 
 ### Config precedence
 
-Env vars > `.env` > `~/.config/nl-db/config.toml` > built-in defaults. Implemented via a custom `PydanticBaseSettingsSource` in `config.py` (the obvious approach of passing TOML data as kwargs to `Settings()` makes TOML beat env — which is wrong). API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`, never from TOML. `nl-db schema` and `nl-db config` deliberately don't build a provider so they work without an API key.
+Env vars > `.env` > `./nl-db.toml` (project-local, `NL_DB_CONFIG_FILE` override) > built-in defaults. Implemented via a custom `PydanticBaseSettingsSource` in `config.py` (the obvious approach of passing TOML data as kwargs to `Settings()` makes TOML beat env — which is wrong). API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`, never from TOML. `save_settings()` writes the non-secret blocks (provider/db/limits/generation) but explicitly never the API key. `nl-db schema` and `nl-db config` deliberately don't build a provider so they work without an API key.
 
 ### Apple Intelligence path
 

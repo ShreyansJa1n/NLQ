@@ -26,6 +26,10 @@ htmlcov/
 .env.*
 !.env.example
 
+# project-local nl-db config (provider, model, limits, generation knobs).
+# untracked by default — uncomment to commit a shared team config.
+nl-db.toml
+
 *.log
 ~/.local/share/nl-db/
 
