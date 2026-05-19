@@ -1,173 +1,87 @@
-# NL-to-SQL + MCP Server — Project Plan
-
-> Natural language database querying powered by Apple Intelligence, with MCP server support.
-
----
+# nl-db — plan
 
 ## Vision
 
-Build a privacy-first, cost-efficient tool that lets any user query databases in plain English — running entirely on-device via Apple Intelligence, and exposable as an MCP server to any compatible client (Claude Desktop, Cursor, etc.).
+nl-db lets anyone query a database in plain English. The audience is both:
 
----
+- **End users** (often non-technical) via a chat UI — natural language in, answer out, with clarifying follow-ups when the question is ambiguous.
+- **Host LLMs** via an MCP server — host LLMs send NL, not SQL. nl-db does the translation behind the scenes.
+
+Both surfaces wrap the same pipeline. SQL is an implementation detail, not an interface. The CLI and the Streamlit playground keep SQL editable for power users; everywhere else the user / host LLM never has to think about SQL.
 
 ## Architecture
 
 ```
-[Natural Language Input]
-        ↓
-[LLM Layer] ← Apple Intelligence via OpenAI-compatible Swift HTTP server
-        ↓          (fallback: any OpenAI-compatible API)
-[SQL Generator] ← schema-aware prompt builder
-        ↓
-[SQL Validator] ← syntax check, DML guard, timeout
-        ↓
-[Query Executor] ← read-only by default
-        ↓
-[Result Formatter] ← table / JSON / NL summary
-        ↓
-[MCP Server Layer] ← exposes tools to external clients
+[Chat UI: end users]              [MCP server: host LLMs]
+            ↓                                  ↓
+        [Chat session — multi-turn, with clarifying follow-ups]
+                                 ↓
+                  [NL → SQL → answer pipeline]
+                  - schema extraction (cached)
+                  - prompt building (schema-first)
+                  - LLM call (provider-agnostic)
+                  - SQL validation (sqlglot; read-only default)
+                  - query execution
+                  - paraphrase + NL-error wrapping
+                                 ↓
+                          [Database]
 ```
 
-### Key Design Decisions
+## Core invariants (do not break)
 
-- **Schema-first prompting** — always fetch live schema before generating SQL; inject it into every prompt
-- **SQL transparency** — show generated SQL to user before execution; never auto-run silently
-- **Abstracted LLM layer** — OpenAI-compatible interface means any model can be swapped in via config
-- **Read-only by default** — writes require an explicit `--allow-writes` flag
+- **Schema-first prompting.** Live schema is injected into every LLM call.
+- **Three-state generator output.** Every NL question resolves to exactly one of:
+  - `ANSWER(sql)` — the happy path
+  - `CANNOT_ANSWER(reason, available_tables)` — schema doesn't contain the data; reason is plain English
+  - `CLARIFY(question)` — request is ambiguous; we ask back in the user's vocabulary
+- **NL-friendly errors.** No raw stack traces, sqlglot parse errors, or SQLite messages reach the user — they're translated to plain English first.
+- **SQL transparency.** Generated SQL is surfaced alongside results (or in the MCP response) for review. The user / host LLM is never *asked* to write it.
+- **Read-only by default.** Writes only with explicit `--allow-writes`. The MCP server hides `run_sql` behind an opt-in `--expose-run-sql` flag — the NL path covers the common case.
+- **Provider-agnostic.** Every LLM call goes through the `LLMProvider` Protocol. Adding a new backend is one file.
+- **Eval-driven.** Prompt changes regress only if eval catches them — so every new prompt state needs eval coverage.
 
----
+## Roadmap (next iteration, ordered)
 
-## Components
+1. **Three-state generator** — sentinel-based prompt format yielding `ANSWER | CANNOT_ANSWER | CLARIFY`. NL-error surface module that wraps raw exceptions before they reach any user-facing layer.
+2. **MCP schema improvements** — new `describe_database()` tool + top-level `db://schema` Resource so the host LLM grounds itself in one call (not N+1). Tool descriptions explicitly nudge "call `describe_database` before `query_database`."
+3. **`CANNOT_ANSWER` carries hints** — `available_tables` plus a suggested rephrase, so the host LLM / user can adjust without a second LLM round-trip.
+4. **MCP surface narrows** — `run_sql` moves behind `--expose-run-sql` (default off). `query_database` becomes the canonical NL path. CLI and UI keep direct-SQL paths for power users.
+5. **Eval cases for the new states** — cannot-answer, clarify, ambiguous-tables, and error-wrapping cases. Cache disabled in eval runs.
+6. **UI three-state rendering + chat tab** — info banner for `CANNOT_ANSWER`, follow-up input for `CLARIFY`. New "Chat" tab in the Streamlit playground using the three-state output as the natural multi-turn trigger.
+7. **Multi-turn chat** — conversation state in the pipeline; MCP `query_database` gains an optional `conversation_id` so host LLMs carry context across calls.
 
-### 1. Apple Intelligence HTTP Server (Swift — separate project)
-- Wraps on-device model, exposes `POST /v1/chat/completions`
-- Request/response matches OpenAI spec exactly
-- This is a dependency, not built here — must be running locally
+## Future work (post-roadmap, rough priority)
 
-### 2. Schema Extractor
-- Connects to DB, extracts tables, columns, types, PKs, FKs
-- Outputs token-efficient schema string for prompt injection
-- Supported DBs: SQLite (phase 1), PostgreSQL, MySQL (phase 4)
+### Caching
 
-### 3. SQL Generator
-- Builds prompt: system message + schema + few-shot examples + user question
-- Calls LLM via HTTP, parses SQL from response (handles markdown fences)
-- Returns SQL string for validation — does not execute directly
+- **Provider-side first.** Anthropic prompt caching (`cache_control: ephemeral` on the schema block) — ~30 mins of work, 30–50% latency win on repeat calls. OpenAI prompt caching is automatic when the prompt prefix is stable.
+- **In-process LRU** for NL→SQL and paraphrase, keyed on `(schema_hash, question, model, temperature, num_few_shot, prompt_version)`. Lives in the MCP server process; the CLI doesn't need it.
+- **Cache disabled in eval and tests by default** — caching hides regressions.
+- **Cache observability** — hit/miss recorded in the existing JSONL log so we can measure hit rate before declaring success.
+- **NOT caching query results.** The underlying DB may be written to by other processes; freshness is part of the contract. If ever added, behind an explicit TTL flag with a documented staleness window.
 
-### 4. SQL Validator
-- Syntax check before execution
-- Reject or flag DML (INSERT/UPDATE/DELETE) unless writes are allowed
-- Enforce query timeout (default: 10s)
+### Additional database backends
 
-### 5. Query Executor
-- Executes validated SQL against connected DB
-- Result formats: table (CLI), JSON (API/MCP), NL summary (second LLM pass)
-- Connection pooling for repeated queries
+- **Postgres** and **MySQL** adapters drop into the existing `SchemaExtractor` Protocol slot and the `QueryExecutor` dispatch. Each is one new file + dialect-specific prompt tuning + new eval cases.
+- **Dialect-aware system prompts** — currently SQLite-tuned. Postgres / MySQL each get their own.
 
-### 6. MCP Server
-Exposes the pipeline as an MCP server with four tools:
+### Schema enrichment (opt-in)
 
-| Tool | Description |
-|------|-------------|
-| `list_tables` | Returns all table names in the connected DB |
-| `describe_schema(table_name)` | Returns full schema for a specific table |
-| `query_database(question)` | Full NL → SQL → result pipeline |
-| `run_sql(sql)` | Executes raw SQL directly (gated behind `--allow-writes`) |
+- `describe_database(include_stats=true)` returning row counts per table, date ranges on date columns, sample values for low-cardinality string columns.
+- Opt-in because sample values risk leaking PII through the MCP boundary; row counts / date ranges cost extra queries on every fetch.
 
-> Tool descriptions must be written precisely — the host model uses them to decide when and how to call each tool. Treat them as product copy, not boilerplate.
+### Result summarizer
 
----
+- A `--summarize` flag (CLI) / `summarize=true` parameter (MCP) that adds a second LLM pass over the result rows: *"The top three users by spend are Alice ($X), Bob ($Y), Carol ($Z)."* Distinct from the paraphrase (which describes the SQL).
 
-## Use Cases
+### Observability and cost
 
-1. **Personal finance** — query a local SQLite transactions DB ("how much did I spend on groceries last month?")
-2. **Developer DB exploration** — explore an unfamiliar schema from inside Cursor or Claude Desktop without leaving the editor
-3. **Small business ops** — non-technical operators querying sales/inventory data without SQL knowledge
-4. **Privacy-sensitive domains** — healthcare, legal, HR — data never leaves the device, no cloud API required
-5. **Local dev & testing** — verify seed data, check FK relationships, audit state after test runs
-6. **MCP client augmentation** — any MCP-compatible client gains live DB access with zero additional work
+- **Per-request cost estimate** in the JSONL log (provider × input_tokens × output_tokens × per-model rates).
+- **Aggregate dashboard** (CLI subcommand) over the log — *"queries this week, hit rate, avg latency, total cost."*
+- **Cross-provider eval comparison** — run the eval set against multiple configured providers and produce a diff report.
 
----
+### Ergonomics
 
-## Phased Plan
-
-### Phase 1 — Foundation (Weeks 1–3)
-Goal: end-to-end pipeline working for SQLite via CLI
-
-- [ ] Project structure and dependency setup
-- [ ] SQLite schema extractor (tables, columns, types, PKs, FKs)
-- [ ] Prompt builder (system + schema + few-shot + question)
-- [ ] Wire to a cloud LLM first (GPT-4 or Claude) for baseline quality testing
-- [ ] SQL validator (syntax, DML guard, timeout enforcement)
-- [ ] Query executor with table + JSON output
-- [ ] CLI: connect → ask → show SQL → confirm → run → display results
-- [ ] Integration tests against a sample SQLite DB
-
-### Phase 2 — Apple Intelligence Integration (Weeks 4–5)
-Goal: replace cloud LLM with on-device model; validate quality
-
-- [ ] Define LLM provider interface (abstraction layer)
-- [ ] Implement OpenAI-compatible HTTP client
-- [ ] Point client at Apple Intelligence Swift server
-- [ ] Run Phase 1 test suite against on-device model; document quality gaps
-- [ ] Tune prompts specifically for Apple Intelligence's capabilities and context window
-- [ ] Implement fallback: if SQL fails validation, retry with cloud model
-- [ ] Benchmark latency (cold start, warm, complex queries)
-
-### Phase 3 — MCP Server (Weeks 6–8)
-Goal: expose pipeline as a working MCP server; verify with real clients
-
-- [ ] MCP server scaffold using official MCP SDK
-- [ ] Implement `list_tables` tool
-- [ ] Implement `describe_schema` tool
-- [ ] Implement `query_database` tool (full pipeline)
-- [ ] Implement `run_sql` tool (behind `--allow-writes` flag)
-- [ ] Write tool descriptions (first-class work, not an afterthought)
-- [ ] Add `dry_run` mode: generate SQL but don't execute, return SQL for review
-- [ ] Integration test with Claude Desktop
-- [ ] Integration test with Cursor
-
-### Phase 4 — Polish & Expand (Weeks 9–12)
-Goal: multi-DB support, NL result summaries, production readiness
-
-- [ ] PostgreSQL adapter
-- [ ] MySQL/MariaDB adapter
-- [ ] NL result summarizer (second LLM pass over query results)
-- [ ] Connection config manager (multiple named DB connections)
-- [ ] Schema caching + prompt caching for performance
-- [ ] Optional: simple web UI (query input, SQL preview, results table)
-- [ ] User-facing docs and setup guide
-
----
-
-## Risks
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Apple Intelligence SQL quality insufficient for complex queries | High | Prompt engineering + few-shot examples; fallback to cloud model on validation failure |
-| Wrong SQL silently returns incorrect results | High | SQL transparency step is mandatory; add row count warnings and empty result alerts |
-| Schema too large for on-device context window | Medium | Schema compression; omit indexes; let user specify relevant tables |
-| Vague MCP tool descriptions cause host model misuse | Medium | Treat descriptions as product copy; test with multiple host models; add `dry_run` mode |
-| SQL injection via generated queries | Medium | Read-only by default; validate and sanitize all SQL before execution |
-| Apple Intelligence Swift server reliability | Low | Abstract LLM behind interface; cloud fallback always available |
-
----
-
-## Success Metrics
-
-**Phase 1:** ≥80% SQL accuracy on 30-query test set; P90 latency <5s; zero silent wrong results  
-**Phase 2:** On-device accuracy within 15pp of cloud baseline; fallback triggers correctly  
-**Phase 3:** All four tools callable from Claude Desktop; no data leaves device on Apple Intelligence path  
-**Phase 4:** Postgres + MySQL tests passing; NL summaries rated useful; setup completable in <30 min  
-
----
-
-## Tech Stack
-
-- **Language:** Swift (natural fit for Apple Intelligence integration) or Python for SQL engine
-- **LLM interface:** OpenAI-compatible HTTP (abstracted — swap any compliant endpoint via config)
-- **Primary model:** Apple Intelligence via companion Swift HTTP server
-- **Fallback model:** Any OpenAI-compatible API (GPT-4, Claude, Ollama)
-- **MCP SDK:** Official Anthropic MCP SDK
-- **DB drivers:** SQLite (built-in), libpq (PostgreSQL), MySQL connector
-- **Testing:** unit tests per component + integration tests against in-memory SQLite
+- **Web UI hardening** — single-password auth before exposing the Streamlit UI on anything other than localhost.
+- **MCP HTTP / SSE transport** — currently stdio only. HTTP unlocks remote MCP clients.
+- **Per-conversation MCP sessions** — if / when the server becomes a long-lived multi-tenant service.
