@@ -46,7 +46,7 @@ Both surfaces wrap the same pipeline. SQL is an implementation detail, not an in
 2. ✅ **MCP schema improvements + surface narrowing** — `describe_database()` tool + top-level `db://schema` Resource (one call grounds the host LLM in the full schema). `query_database` returns three states (`ANSWER` / `CANNOT_ANSWER` / `CLARIFY`). `run_sql` moved behind `--expose-run-sql` (default off); `--allow-writes` now requires `--expose-run-sql`. Tool descriptions rewritten as NL-first product copy.
 3. **`CANNOT_ANSWER` carries hints** — `available_tables` (done — injected by Pipeline from live schema and surfaced in MCP responses) plus an optional `suggested_rephrase` (second LLM call). *Rephrase deferred pending eval data on cannot-answer frequency.*
 4. ✅ **MCP surface narrows** — folded into #2 above.
-5. **Eval cases for the new states** — cannot-answer, clarify, ambiguous-tables, and error-wrapping cases. Cache disabled in eval runs.
+5. ✅ **Eval cases for the new states** — 3 `CANNOT_ANSWER` + 2 `CLARIFY` cases added; runner does state-match before row/SQL scoring; per-case Markdown report shows actual vs expected state.
 6. **UI three-state rendering + chat tab** — info banner for `CANNOT_ANSWER`, follow-up input for `CLARIFY`. New "Chat" tab in the Streamlit playground using the three-state output as the natural multi-turn trigger.
 7. **Multi-turn chat** — conversation state in the pipeline; MCP `query_database` gains an optional `conversation_id` so host LLMs carry context across calls.
 

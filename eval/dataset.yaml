@@ -150,3 +150,32 @@
   nl: "Show the user name and the date of their most recent transaction."
   expected_sql_pattern: "(?is)MAX\\(occurred_on\\)|ROW_NUMBER"
   expected_row_count: 3
+
+# ---- CANNOT_ANSWER cases ----
+# Questions about domains the schema (users / categories / vendors / transactions)
+# doesn't cover. The model should respond with CANNOT_ANSWER, not hallucinate
+# a table or pick a wrong one.
+
+- id: cna01
+  nl: "How many employees does the company have?"
+  expected_state: CANNOT_ANSWER
+
+- id: cna02
+  nl: "List all product SKUs with their prices."
+  expected_state: CANNOT_ANSWER
+
+- id: cna03
+  nl: "Show patient records for the last visit of each patient."
+  expected_state: CANNOT_ANSWER
+
+# ---- CLARIFY cases ----
+# Genuinely ambiguous questions where the schema has multiple reasonable
+# interpretations. The model should ask back, not guess.
+
+- id: clr01
+  nl: "Show me the recent ones."
+  expected_state: CLARIFY
+
+- id: clr02
+  nl: "Get me the total."
+  expected_state: CLARIFY

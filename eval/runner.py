@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from nl_db.config import load_settings  # noqa: E402
+from nl_db.generator import Answer, CannotAnswer, Clarify  # noqa: E402
 from nl_db.llm.registry import build_provider  # noqa: E402
 from nl_db.pipeline import Pipeline  # noqa: E402
 from tests.fixtures.build_sample_db import SAMPLE_DB  # noqa: E402
@@ -34,10 +35,14 @@ DATASET = Path(__file__).parent / "dataset.yaml"
 REPORTS_DIR = Path(__file__).parent / "reports"
 
 
+ExpectedState = str  # "ANSWER" | "CANNOT_ANSWER" | "CLARIFY"
+
+
 @dataclass
 class EvalCase:
     id: str
     nl: str
+    expected_state: ExpectedState = "ANSWER"
     expected_rows: list[list[Any]] | None = None
     ordered: bool = False
     expected_row_count: int | None = None
@@ -47,6 +52,7 @@ class EvalCase:
 @dataclass
 class CaseResult:
     case: EvalCase
+    actual_state: str
     generated_sql: str
     passed: bool
     reason: str
@@ -64,6 +70,7 @@ def _load_cases(path: Path) -> list[EvalCase]:
             EvalCase(
                 id=entry["id"],
                 nl=entry["nl"],
+                expected_state=entry.get("expected_state", "ANSWER"),
                 expected_rows=entry.get("expected_rows"),
                 ordered=bool(entry.get("ordered", False)),
                 expected_row_count=entry.get("expected_row_count"),
@@ -144,15 +151,41 @@ def run_eval(
         try:
             out = pipe.run(case.nl)
             duration = time.monotonic() - start
-            assert out.result is not None
-            passed, reason = _score(case, out.sql_final, out.result.rows)
+
+            # State-match first — if the case expects CANNOT_ANSWER or CLARIFY,
+            # we don't score on SQL/rows.
+            if case.expected_state != out.state:
+                passed = False
+                reason = (
+                    f"state mismatch: expected {case.expected_state}, got {out.state}"
+                )
+                generated_sql = out.sql_final or ""
+                row_count = out.result.row_count if out.result else None
+            elif isinstance(out.outcome, (CannotAnswer, Clarify)):
+                passed = True
+                reason = (
+                    f"state match ({out.state})"
+                    if not isinstance(out.outcome, CannotAnswer)
+                    else f"state match (CANNOT_ANSWER: {out.outcome.reason[:60]})"
+                )
+                generated_sql = ""
+                row_count = None
+            else:
+                assert isinstance(out.outcome, Answer)
+                assert out.result is not None
+                assert out.sql_final is not None
+                passed, reason = _score(case, out.sql_final, out.result.rows)
+                generated_sql = out.sql_final
+                row_count = out.result.row_count
+
             results.append(
                 CaseResult(
                     case=case,
-                    generated_sql=out.sql_final,
+                    actual_state=out.state,
+                    generated_sql=generated_sql,
                     passed=passed,
                     reason=reason,
-                    row_count=out.result.row_count,
+                    row_count=row_count,
                     duration_s=duration,
                     metadata={"provider": provider.name, "model": provider.model},
                 )
@@ -164,6 +197,7 @@ def run_eval(
             results.append(
                 CaseResult(
                     case=case,
+                    actual_state="ERROR",
                     generated_sql="",
                     passed=False,
                     reason=f"exception: {type(e).__name__}: {e}",
@@ -184,25 +218,38 @@ def write_report(results: list[CaseResult], path: Path) -> None:
     pct = (passed / total * 100) if total else 0.0
     meta = results[0].metadata if results else {}
 
+    by_state: dict[str, int] = {}
+    for r in results:
+        by_state[r.actual_state] = by_state.get(r.actual_state, 0) + 1
+    state_summary = ", ".join(f"{k}={v}" for k, v in sorted(by_state.items()))
+
     lines = [
         f"# nl-db eval report — {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         f"- Provider: `{meta.get('provider', '?')}`",
         f"- Model:    `{meta.get('model', '?')}`",
         f"- Score:    **{passed}/{total} ({pct:.1f}%)**",
+        f"- States:   {state_summary}",
         "",
         "## Per-question results",
         "",
-        "| ID | Pass | Time (s) | Question | Generated SQL | Reason |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| ID | Pass | State | Time (s) | Question | Generated SQL | Reason |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in results:
         sql_one_line = " ".join(r.generated_sql.split())
         nl_short = r.case.nl.replace("|", "\\|")
         reason = r.reason.replace("|", "\\|")
+        expected = r.case.expected_state
+        state_col = (
+            r.actual_state
+            if r.actual_state == expected
+            else f"{r.actual_state} (exp {expected})"
+        )
         lines.append(
             f"| {r.case.id} | "
             f"{'✅' if r.passed else '❌'} | "
+            f"{state_col} | "
             f"{r.duration_s:.1f} | "
             f"{nl_short} | "
             f"`{sql_one_line[:120]}` | "
