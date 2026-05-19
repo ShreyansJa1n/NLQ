@@ -46,7 +46,17 @@ def extract_sql(text: str) -> str:
     return candidate + ";"
 
 
-def generate_sql(provider: LLMProvider, prompt: BuiltPrompt) -> str:
+def generate_sql(
+    provider: LLMProvider,
+    prompt: BuiltPrompt,
+    *,
+    temperature: float = 0.0,
+    max_output_tokens: int = 512,
+) -> str:
     """Run the prompt through the provider and extract a single SQL statement."""
-    result = provider.chat(prompt.messages, temperature=0.0, max_output_tokens=512)
+    result = provider.chat(
+        prompt.messages,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+    )
     return extract_sql(result.text)

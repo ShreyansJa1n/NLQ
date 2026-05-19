@@ -19,6 +19,7 @@ class CannedProvider:
     def __init__(self, *responses: str) -> None:
         self._queue = list(responses)
         self.calls: list[list[Message]] = []
+        self.call_kwargs: list[dict[str, object]] = []
 
     def chat(
         self,
@@ -28,6 +29,9 @@ class CannedProvider:
         max_output_tokens: int = 1024,
     ) -> ChatResult:
         self.calls.append(messages)
+        self.call_kwargs.append(
+            {"temperature": temperature, "max_output_tokens": max_output_tokens}
+        )
         text = self._queue.pop(0) if self._queue else ""
         return ChatResult(text=text)
 
@@ -117,3 +121,56 @@ def test_pipeline_paraphrase_disabled(sample_db: Path) -> None:
     assert out.paraphrase is None
     # only one LLM call (no paraphrase pass)
     assert len(provider.calls) == 1
+
+
+def test_pipeline_passes_temperature_and_max_tokens_through(sample_db: Path) -> None:
+    provider = CannedProvider(
+        "```sql\nSELECT 1\n```",
+        "Returns the number 1.",
+    )
+    pipe = Pipeline(
+        provider=provider,
+        db_path=sample_db,
+        temperature=0.7,
+        max_output_tokens=256,
+        paraphrase_temperature=0.3,
+        paraphrase_max_output_tokens=64,
+    )
+    pipe.run("just one")
+    assert provider.call_kwargs[0] == {"temperature": 0.7, "max_output_tokens": 256}
+    assert provider.call_kwargs[1] == {"temperature": 0.3, "max_output_tokens": 64}
+
+
+def test_pipeline_auto_limit_can_be_disabled(sample_db: Path) -> None:
+    provider = CannedProvider(
+        "```sql\nSELECT id FROM users\n```",
+        "Returns user ids.",
+    )
+    pipe = Pipeline(provider=provider, db_path=sample_db, auto_limit=False)
+    out = pipe.run("ids")
+    assert out.auto_limit_applied is False
+    assert "LIMIT" not in out.sql_final.upper()
+
+
+def test_pipeline_num_few_shot_zero_omits_examples(sample_db: Path) -> None:
+    provider = CannedProvider(
+        "```sql\nSELECT 1\n```",
+        "One.",
+    )
+    pipe = Pipeline(provider=provider, db_path=sample_db, num_few_shot=0)
+    pipe.run("nothing useful")
+    user_prompt = provider.calls[0][1].content
+    assert "Example 1" not in user_prompt
+    assert "Schema:" in user_prompt
+
+
+def test_pipeline_num_few_shot_one_truncates_examples(sample_db: Path) -> None:
+    provider = CannedProvider(
+        "```sql\nSELECT 1\n```",
+        "One.",
+    )
+    pipe = Pipeline(provider=provider, db_path=sample_db, num_few_shot=1)
+    pipe.run("one example only")
+    user_prompt = provider.calls[0][1].content
+    assert "Example 1 question:" in user_prompt
+    assert "Example 2 question:" not in user_prompt

@@ -8,6 +8,7 @@ from .executor import QueryExecutor, QueryResult, SQLiteExecutor
 from .generator import generate_sql
 from .llm.provider import LLMProvider
 from .prompts.builder import BuiltPrompt, build_sql_prompt, exceeds_budget
+from .prompts.examples import FewShotExample, few_shot_for
 from .prompts.paraphrase import paraphrase_sql
 from .schema.base import Schema
 from .schema.cache import SchemaCache
@@ -58,6 +59,13 @@ class Pipeline:
         schema_cache: SchemaCache | None = None,
         executor: QueryExecutor | None = None,
         paraphrase: bool = True,
+        # Generation tuning knobs (exposed for the Streamlit playground)
+        temperature: float = 0.0,
+        max_output_tokens: int = 512,
+        paraphrase_temperature: float = 0.0,
+        paraphrase_max_output_tokens: int = 128,
+        auto_limit: bool = True,
+        num_few_shot: int | None = None,
     ) -> None:
         self._provider = provider
         self._db_path = db_path
@@ -68,11 +76,24 @@ class Pipeline:
             db_path, timeout_s=timeout_s, max_rows=max_rows
         )
         self._paraphrase = paraphrase
+        self._temperature = temperature
+        self._max_output_tokens = max_output_tokens
+        self._paraphrase_temperature = paraphrase_temperature
+        self._paraphrase_max_output_tokens = paraphrase_max_output_tokens
+        self._auto_limit = auto_limit
+        self._num_few_shot = num_few_shot
 
     def schema(self) -> Schema:
         return self._cache.get(
             self._db_path, lambda: SQLiteSchemaExtractor.from_path(self._db_path).extract()
         )
+
+    def _select_examples(self, schema: Schema) -> tuple[FewShotExample, ...] | None:
+        if self._num_few_shot is None:
+            return None  # builder will use default
+        if self._num_few_shot <= 0:
+            return ()
+        return few_shot_for(schema.dialect)[: self._num_few_shot]
 
     def run(
         self,
@@ -82,24 +103,36 @@ class Pipeline:
         confirm: ConfirmFn | None = None,
     ) -> PipelineOutput:
         schema = self.schema()
-        prompt = build_sql_prompt(schema, question)
+        prompt = build_sql_prompt(
+            schema, question, examples=self._select_examples(schema)
+        )
         if exceeds_budget(prompt, self._max_prompt_tokens):
             # Soft warning only — the LLM may still handle it. The caller can
             # inspect prompt.approx_tokens against max_prompt_tokens if it
             # wants to surface this to the user.
             pass
 
-        sql_raw = generate_sql(self._provider, prompt)
+        sql_raw = generate_sql(
+            self._provider,
+            prompt,
+            temperature=self._temperature,
+            max_output_tokens=self._max_output_tokens,
+        )
         validation = validate_sql(
             sql_raw,
             dialect=schema.dialect,
             allow_writes=allow_writes,
-            max_rows=self._max_rows,
+            max_rows=self._max_rows if self._auto_limit else None,
         )
 
         paraphrase: str | None = None
         if self._paraphrase:
-            paraphrase = paraphrase_sql(self._provider, validation.sql)
+            paraphrase = paraphrase_sql(
+                self._provider,
+                validation.sql,
+                temperature=self._paraphrase_temperature,
+                max_output_tokens=self._paraphrase_max_output_tokens,
+            )
 
         confirm_fn = confirm or _auto_confirm
         confirmed = confirm_fn(validation.sql, paraphrase)
@@ -124,5 +157,3 @@ class Pipeline:
             confirmed=confirmed,
             skipped_reason=skipped_reason,
         )
-
-
