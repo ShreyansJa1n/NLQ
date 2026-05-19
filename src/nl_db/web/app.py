@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anthropic
+import openai
 import pandas as pd
 import streamlit as st
 
@@ -29,6 +31,41 @@ from nl_db.pipeline import Pipeline, PipelineOutput
 from nl_db.schema.base import render_for_prompt
 from nl_db.schema.sqlite import SQLiteSchemaExtractor
 from nl_db.validator import SQLValidationError, validate_sql
+
+
+def _explain_llm_error(e: Exception) -> str:
+    """Build a more useful error message for common LLM-call failures."""
+    provider = st.session_state.provider_name
+    model = st.session_state.model
+    base = st.session_state.base_url or "(provider default)"
+    where = (
+        f"provider=**{provider}**, model=**`{model}`**, base_url=**`{base}`**"
+    )
+
+    if isinstance(e, (anthropic.NotFoundError, openai.NotFoundError)):
+        hint = (
+            "The LLM API returned **404 Not Found**. The most common cause is a "
+            "model name that doesn't exist for this provider/account. Check the "
+            "Model field in the sidebar against your provider's model list. "
+            "For an OpenAI-compatible server, also verify the Base URL "
+            "(e.g. Ollama is `http://localhost:11434/v1`, not 8080)."
+        )
+        return f"{hint}\n\nCalled with: {where}\n\nRaw: `{e}`"
+
+    if isinstance(e, (anthropic.AuthenticationError, openai.AuthenticationError)):
+        return (
+            f"The LLM API rejected the API key. Re-check the **API key** field "
+            f"in the sidebar.\n\nCalled with: {where}\n\nRaw: `{e}`"
+        )
+
+    if isinstance(e, (anthropic.APIConnectionError, openai.APIConnectionError)):
+        return (
+            f"Couldn't reach the LLM endpoint. If you're using `openai_compatible`, "
+            f"confirm your local server is running.\n\nCalled with: {where}\n\nRaw: `{e}`"
+        )
+
+    return f"{type(e).__name__}: {e}\n\nCalled with: {where}"
+
 
 st.set_page_config(
     page_title="nl-db playground",
@@ -333,7 +370,7 @@ with tab_query:
                     st.error(f"Validation refused this SQL: {e}", icon="🛑")
                     st.session_state.last_output = None
                 except Exception as e:  # noqa: BLE001
-                    st.error(f"{type(e).__name__}: {e}", icon="❌")
+                    st.error(_explain_llm_error(e), icon="❌")
                     st.session_state.last_output = None
 
         out = st.session_state.last_output
@@ -444,7 +481,7 @@ with tab_query:
                         ),
                     )
                 except Exception as e:  # noqa: BLE001
-                    st.error(f"{type(e).__name__}: {e}", icon="❌")
+                    st.error(_explain_llm_error(e), icon="❌")
                     st.session_state.history.insert(
                         0,
                         HistoryEntry(
