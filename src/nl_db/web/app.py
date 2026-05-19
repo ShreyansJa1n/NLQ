@@ -78,6 +78,70 @@ def _make_capturing_http_client(captures: list[dict[str, Any]]) -> httpx.Client:
     )
 
 
+def _preview_outgoing_request(
+    messages: list[Any],
+    *,
+    temperature: float,
+    max_output_tokens: int,
+) -> dict[str, Any]:
+    """Construct the HTTP request body that nl-db WOULD send to the configured
+    provider, without actually sending it.
+
+    Useful for diagnosing config problems against a broken endpoint — you can
+    see the model name, headers, and base URL without any network call.
+    """
+    provider_name = st.session_state.provider_name
+    model = st.session_state.model
+    msgs_wire = [{"role": m.role, "content": m.content} for m in messages]
+
+    if provider_name == "anthropic":
+        url = "https://api.anthropic.com/v1/messages"
+        system_parts = [m["content"] for m in msgs_wire if m["role"] == "system"]
+        convo = [m for m in msgs_wire if m["role"] != "system"]
+        body: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_output_tokens,
+            "temperature": temperature,
+            "messages": convo,
+        }
+        if system_parts:
+            body["system"] = "\n\n".join(system_parts)
+        headers = {
+            "x-api-key": "<redacted>",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+    elif provider_name == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+        body = {
+            "model": model,
+            "messages": msgs_wire,
+            "temperature": temperature,
+            "max_tokens": max_output_tokens,
+        }
+        headers = {
+            "Authorization": "Bearer <redacted>",
+            "Content-Type": "application/json",
+        }
+    elif provider_name == "openai_compatible":
+        base = (st.session_state.base_url or "").rstrip("/")
+        url = f"{base}/chat/completions" if base else "(base_url not set)"
+        body = {
+            "model": model,
+            "messages": msgs_wire,
+            "temperature": temperature,
+            "max_tokens": max_output_tokens,
+        }
+        headers = {
+            "Authorization": "Bearer <redacted>",
+            "Content-Type": "application/json",
+        }
+    else:
+        raise RuntimeError(f"Unknown provider: {provider_name}")
+
+    return {"method": "POST", "url": url, "headers": headers, "body": body}
+
+
 def _curl_equivalent(req: dict[str, Any]) -> str:
     """Render a captured request as a copy-pasteable curl command."""
     skip = {
@@ -190,6 +254,7 @@ def _init_state() -> None:
     st.session_state.last_output: PipelineOutput | None = None
     st.session_state.edited_sql: str | None = None
     st.session_state.last_captures: list[dict[str, Any]] = []
+    st.session_state.preview_only: bool = False
 
 
 def _snapshot_settings_from_state() -> Settings:
@@ -447,7 +512,7 @@ with tab_query:
     if not st.session_state.db_path:
         st.info("Set a SQLite path in the sidebar to get started.", icon="📁")
     else:
-        col_q, col_btn = st.columns([5, 1], vertical_alignment="bottom")
+        col_q, col_gen, col_preview = st.columns([5, 1, 1], vertical_alignment="bottom")
         with col_q:
             question = st.text_area(
                 "Question",
@@ -455,13 +520,124 @@ with tab_query:
                 placeholder='"How much did each user spend last month?"',
                 height=80,
             )
-        with col_btn:
+        with col_gen:
             generate_clicked = st.button(
                 "Generate SQL", type="primary", use_container_width=True
             )
+        with col_preview:
+            preview_clicked = st.button(
+                "Preview only",
+                use_container_width=True,
+                help=(
+                    "Builds the prompt and shows the exact HTTP request body "
+                    "nl-db would send — no LLM call is made. Useful when your "
+                    "endpoint is misconfigured and Generate SQL fails."
+                ),
+            )
+
+        if preview_clicked and question.strip():
+            try:
+                from nl_db.prompts.builder import build_sql_prompt
+
+                # Build the prompt without needing API keys or a working endpoint.
+                # We need the schema to inject — that only requires reading the SQLite file.
+                from nl_db.schema.cache import SchemaCache
+                from nl_db.schema.sqlite import SQLiteSchemaExtractor
+
+                db_path = Path(st.session_state.db_path).expanduser()
+                if not db_path.exists():
+                    raise RuntimeError(f"Database not found: {db_path}")
+                schema = SchemaCache().get(
+                    db_path,
+                    lambda: SQLiteSchemaExtractor.from_path(db_path).extract(),
+                )
+                n_few_shot: int | None = (
+                    None
+                    if st.session_state.num_few_shot == -1
+                    else st.session_state.num_few_shot
+                )
+                if n_few_shot is None:
+                    examples = None
+                elif n_few_shot <= 0:
+                    examples = ()
+                else:
+                    from nl_db.prompts.examples import few_shot_for
+
+                    examples = few_shot_for(schema.dialect)[:n_few_shot]
+
+                prompt = build_sql_prompt(schema, question, examples=examples)
+                preview_req = _preview_outgoing_request(
+                    prompt.messages,
+                    temperature=float(st.session_state.temperature),
+                    max_output_tokens=int(st.session_state.max_output_tokens),
+                )
+                st.session_state.last_captures = [preview_req]
+                st.session_state.preview_only = True
+                # Clear any prior real-call output so the page reflects "preview only" state.
+                st.session_state.last_output = None
+                st.session_state.edited_sql = None
+                st.success(
+                    "Built the request body locally — no network call was made.",
+                    icon="📡",
+                )
+            except Exception as e:  # noqa: BLE001
+                st.error(f"{type(e).__name__}: {e}", icon="❌")
+
+        # Debug expander — rendered ALWAYS when we have a captured/previewed
+        # request, regardless of whether the LLM call succeeded, failed, or
+        # was a dry-run preview. Position is intentional: right under the
+        # buttons so a failing call doesn't bury its own diagnostics.
+        captures: list[dict[str, Any]] = st.session_state.get("last_captures", [])
+        if captures:
+            is_preview = bool(st.session_state.get("preview_only", False))
+            label = (
+                f"🐞 Preview: {len(captures)} request body (no call made)"
+                if is_preview
+                else f"🐞 Debug: {len(captures)} LLM API call(s) — request body + curl"
+            )
+            with st.expander(label, expanded=True):
+                if is_preview:
+                    st.caption(
+                        "This is the exact JSON nl-db would POST. Verify "
+                        "`model`, headers, and URL match what your server expects."
+                    )
+                labels = [
+                    "SQL generation" if i == 0 else "Paraphrase"
+                    for i in range(len(captures))
+                ]
+                for i, (lab, req) in enumerate(
+                    zip(labels, captures, strict=False)
+                ):
+                    st.markdown(f"**Call {i + 1}: {lab}**")
+                    st.code(f"{req['method']} {req['url']}", language="http")
+                    body_tab, headers_tab, curl_tab = st.tabs(
+                        ["Body", "Headers", "curl"]
+                    )
+                    with body_tab:
+                        if isinstance(req["body"], (dict, list)):
+                            st.code(
+                                json.dumps(req["body"], indent=2),
+                                language="json",
+                            )
+                        else:
+                            st.code(str(req["body"]))
+                    with headers_tab:
+                        st.code(
+                            "\n".join(
+                                f"{k}: {v}" for k, v in req["headers"].items()
+                            )
+                        )
+                    with curl_tab:
+                        st.caption(
+                            "Authorization is redacted — fill in your key before running."
+                        )
+                        st.code(_curl_equivalent(req), language="bash")
+                    if i < len(captures) - 1:
+                        st.divider()
 
         if generate_clicked and question.strip():
             st.session_state.last_captures = []
+            st.session_state.preview_only = False
             with st.spinner("Calling LLM..."):
                 try:
                     pipeline, captures = _build_pipeline()
@@ -543,48 +719,6 @@ with tab_query:
             if out["paraphrase"]:
                 st.subheader("In plain English")
                 st.success(out["paraphrase"])
-
-            captures: list[dict[str, Any]] = st.session_state.get(
-                "last_captures", []
-            )
-            if captures:
-                with st.expander(
-                    f"🐞 Debug: {len(captures)} LLM API call(s) — request body + curl",
-                    expanded=False,
-                ):
-                    labels = [
-                        "SQL generation" if i == 0 else "Paraphrase"
-                        for i in range(len(captures))
-                    ]
-                    for i, (label, req) in enumerate(
-                        zip(labels, captures, strict=False)
-                    ):
-                        st.markdown(f"**Call {i + 1}: {label}**")
-                        st.code(f"{req['method']} {req['url']}", language="http")
-                        body_tab, headers_tab, curl_tab = st.tabs(
-                            ["Body", "Headers", "curl"]
-                        )
-                        with body_tab:
-                            if isinstance(req["body"], (dict, list)):
-                                st.code(
-                                    json.dumps(req["body"], indent=2),
-                                    language="json",
-                                )
-                            else:
-                                st.code(str(req["body"]))
-                        with headers_tab:
-                            st.code(
-                                "\n".join(
-                                    f"{k}: {v}" for k, v in req["headers"].items()
-                                )
-                            )
-                        with curl_tab:
-                            st.caption(
-                                "Authorization is redacted — fill in your key before running."
-                            )
-                            st.code(_curl_equivalent(req), language="bash")
-                        if i < len(captures) - 1:
-                            st.divider()
 
             run_col, _ = st.columns([1, 5])
             with run_col:
