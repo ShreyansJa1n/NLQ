@@ -42,9 +42,9 @@ Both surfaces wrap the same pipeline. SQL is an implementation detail, not an in
 
 ## Roadmap (next iteration, ordered)
 
-1. **Three-state generator** — sentinel-based prompt format yielding `ANSWER | CANNOT_ANSWER | CLARIFY`. NL-error surface module that wraps raw exceptions before they reach any user-facing layer.
+1. ✅ **Three-state generator** — sentinel-based prompt format yielding `ANSWER | CANNOT_ANSWER | CLARIFY`. NL-error surface module (`nl_db.nl_errors.humanize()`) that wraps raw exceptions before they reach any user-facing layer. *(done — `GenerationOutcome` + Pipeline rework)*
 2. **MCP schema improvements** — new `describe_database()` tool + top-level `db://schema` Resource so the host LLM grounds itself in one call (not N+1). Tool descriptions explicitly nudge "call `describe_database` before `query_database`."
-3. **`CANNOT_ANSWER` carries hints** — `available_tables` plus a suggested rephrase, so the host LLM / user can adjust without a second LLM round-trip.
+3. **`CANNOT_ANSWER` carries hints** — `available_tables` (done — injected by Pipeline from live schema) plus an optional `suggested_rephrase` (second LLM call). *Rephrase deferred pending eval data on cannot-answer frequency.*
 4. **MCP surface narrows** — `run_sql` moves behind `--expose-run-sql` (default off). `query_database` becomes the canonical NL path. CLI and UI keep direct-SQL paths for power users.
 5. **Eval cases for the new states** — cannot-answer, clarify, ambiguous-tables, and error-wrapping cases. Cache disabled in eval runs.
 6. **UI three-state rendering + chat tab** — info banner for `CANNOT_ANSWER`, follow-up input for `CLARIFY`. New "Chat" tab in the Streamlit playground using the three-state output as the natural multi-turn trigger.

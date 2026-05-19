@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from nl_db.generator import SQLExtractionError, extract_sql
+from nl_db.generator import (
+    Answer,
+    CannotAnswer,
+    Clarify,
+    SQLExtractionError,
+    extract_sql,
+    parse_outcome,
+)
 from nl_db.validator import SQLValidationError, validate_sql
 
 # extract_sql ---------------------------------------------------------------
@@ -35,6 +42,62 @@ def test_extract_empty_response_raises() -> None:
 def test_extract_only_fence_raises() -> None:
     with pytest.raises(SQLExtractionError):
         extract_sql("```sql\n   \n```")
+
+
+# parse_outcome ------------------------------------------------------------
+
+def test_parse_outcome_fenced_sql_is_answer() -> None:
+    outcome = parse_outcome("```sql\nSELECT 1\n```")
+    assert isinstance(outcome, Answer)
+    assert outcome.sql == "SELECT 1;"
+
+
+def test_parse_outcome_unfenced_sql_is_answer() -> None:
+    outcome = parse_outcome("SELECT 1;")
+    assert isinstance(outcome, Answer)
+
+
+def test_parse_outcome_cannot_answer_sentinel() -> None:
+    outcome = parse_outcome(
+        "CANNOT_ANSWER: This database has no information about employees."
+    )
+    assert isinstance(outcome, CannotAnswer)
+    assert "employees" in outcome.reason
+    # available_tables is filled in by the Pipeline, not the parser
+    assert outcome.available_tables == ()
+
+
+def test_parse_outcome_cannot_answer_case_insensitive() -> None:
+    outcome = parse_outcome("cannot_answer: no products table here.")
+    assert isinstance(outcome, CannotAnswer)
+
+
+def test_parse_outcome_cannot_answer_in_fenced_block() -> None:
+    # Some models wrap sentinel responses in a code fence — strip and detect.
+    outcome = parse_outcome("```\nCANNOT_ANSWER: nothing relevant.\n```")
+    assert isinstance(outcome, CannotAnswer)
+    assert "nothing relevant" in outcome.reason
+
+
+def test_parse_outcome_clarify_sentinel() -> None:
+    outcome = parse_outcome(
+        "CLARIFY: Do you mean last calendar month or the last 30 days?"
+    )
+    assert isinstance(outcome, Clarify)
+    assert "calendar month" in outcome.question
+
+
+def test_parse_outcome_clarify_with_leading_whitespace() -> None:
+    outcome = parse_outcome("   CLARIFY: Which user?")
+    assert isinstance(outcome, Clarify)
+    assert outcome.question == "Which user?"
+
+
+def test_parse_outcome_garbage_raises_via_sql_path() -> None:
+    # If it's not a sentinel and not extractable SQL, raise from the SQL path.
+    # Empty string definitely fails.
+    with pytest.raises(SQLExtractionError):
+        parse_outcome("")
 
 
 # validate_sql --------------------------------------------------------------

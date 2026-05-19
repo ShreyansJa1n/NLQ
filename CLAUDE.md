@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install deps (+ dev group)
-uv run pytest                                    # full suite (83 tests, <1s)
+uv run pytest                                    # full suite (106 tests, ~1s)
 uv run pytest tests/unit/test_schema.py          # one file
 uv run pytest -k "auto_limit"                    # by test name pattern
 uv run pytest tests/integration/test_mcp_server.py::test_query_database_end_to_end  # one test
@@ -30,15 +30,17 @@ uv run nl-db-ui                                  # Streamlit playground (http://
 
 2. **`SchemaExtractor` Protocol (`src/nl_db/schema/base.py`).** SQLite is the only implementation in v1. `schema/cache.py` caches results keyed by `(path, mtime)` so repeated CLI/MCP calls don't re-introspect the DB. `render_for_prompt()` turns a `Schema` into the compact form injected into LLM prompts — token efficiency is intentional, don't expand it without measuring.
 
-3. **`Pipeline` (`src/nl_db/pipeline.py`).** Orchestrates: `schema()` → `build_sql_prompt` → `generate_sql` → `validate_sql` → optional `paraphrase_sql` → confirm callback → execute → `PipelineOutput`. The `ConfirmFn` callback is the seam between UX surfaces: the CLI plugs an interactive `rich.Confirm`, the MCP server returns SQL to the host model (auto-confirms), `--no-confirm` skips. The pipeline never runs SQL the validator hasn't blessed. Tuning knobs (`temperature`, `max_output_tokens`, `paraphrase_temperature`, `paraphrase_max_output_tokens`, `auto_limit`, `num_few_shot`) are constructor kwargs sourced from the `GenerationConfig` block in `Settings`.
+3. **`Pipeline` (`src/nl_db/pipeline.py`).** Orchestrates: `schema()` → `build_sql_prompt` → `generate_outcome` → branch on outcome. The `generate_outcome` call returns a three-state `GenerationOutcome` (`Answer(sql)` | `CannotAnswer(reason, available_tables)` | `Clarify(question)`) defined in `src/nl_db/generator.py`. Only the `Answer` branch runs `validate_sql` → optional `paraphrase_sql` → confirm callback → execute. `CannotAnswer` and `Clarify` short-circuit; the Pipeline injects `available_tables` from the live schema on `CannotAnswer`. `PipelineOutput.state` returns the stable string `"ANSWER" | "CANNOT_ANSWER" | "CLARIFY"` for callers that don't want to `isinstance`-check. The `ConfirmFn` callback (Answer branch only) is the seam between UX surfaces: the CLI plugs an interactive `rich.Confirm`, the MCP server returns SQL to the host model (auto-confirms), `--no-confirm` skips. Tuning knobs (`temperature`, `max_output_tokens`, `paraphrase_temperature`, `paraphrase_max_output_tokens`, `auto_limit`, `num_few_shot`) are constructor kwargs sourced from the `GenerationConfig` block in `Settings`.
 
 ### Invariants (do not break)
 
 - **Schema-first prompting.** Every SQL generation includes the live (or cached) schema. No stale snapshots, no schema-less prompts.
+- **Three-state generator output.** Every NL question resolves to exactly one of `Answer(sql)`, `CannotAnswer(reason, available_tables)`, or `Clarify(question)`. The system prompt (`prompts/system.py`) defines the wire format (fenced SQL, or `CANNOT_ANSWER: ...` / `CLARIFY: ...` sentinels). `parse_outcome()` in `generator.py` does the dispatch.
+- **NL-friendly errors.** Raw exceptions (`sqlglot.ParseError`, `sqlite3.OperationalError`, `SQLValidationError`, vendor SDK errors) are translated by `nl_db.nl_errors.humanize()` before reaching any user-facing surface. The pipeline still raises raw exceptions internally — only CLI / UI / MCP wrappers humanize.
 - **SQL transparency.** Generated SQL is surfaced (to the user via CLI, to the host LLM via MCP tool response) before any side effect. The paraphrase step (`prompts/paraphrase.py`) gives a one-sentence NL explanation as a second mitigation — schema is deliberately NOT re-sent in the paraphrase prompt.
 - **Read-only by default.** `validator.validate_sql` uses sqlglot's parse tree (not regex) to detect `INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE` and refuses unless `allow_writes=True`. Auto-LIMIT is injected for unbounded SELECTs (skipped for destructive statements).
 - **Provider-agnostic by construction.** No file outside `llm/` may know which LLM is in use. The provider name is *configuration*, not code.
-- **Eval-driven.** `eval/dataset.yaml` is 30 NL→SQL pairs against `tests/fixtures/sample.db`. Any prompt change in `src/nl_db/prompts/` or system-prompt change should be re-evaluated via `python -m eval.runner` before merging.
+- **Eval-driven.** `eval/dataset.yaml` is the NL→SQL test set against `tests/fixtures/sample.db`. Any prompt change in `src/nl_db/prompts/` or system-prompt change should be re-evaluated via `python -m eval.runner` before merging.
 
 ### MCP server
 

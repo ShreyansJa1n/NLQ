@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .executor import QueryExecutor, QueryResult, SQLiteExecutor
-from .generator import generate_sql
+from .generator import (
+    Answer,
+    CannotAnswer,
+    Clarify,
+    GenerationOutcome,
+    generate_outcome,
+)
 from .llm.provider import LLMProvider
 from .prompts.builder import BuiltPrompt, build_sql_prompt, exceeds_budget
 from .prompts.examples import FewShotExample, few_shot_for
@@ -18,17 +24,38 @@ from .validator import ValidationResult, validate_sql
 
 @dataclass
 class PipelineOutput:
+    """Result of one Pipeline.run() call.
+
+    `outcome` is always populated and tells you what happened. Fields under
+    "When outcome is Answer" are populated only for the Answer branch. The
+    `state` property gives a stable string for callers that don't want to
+    isinstance-check.
+    """
+
     question: str
-    sql_raw: str
-    sql_final: str  # post-validation (may include auto-LIMIT)
-    paraphrase: str | None
-    result: QueryResult | None
+    outcome: GenerationOutcome
     prompt: BuiltPrompt
-    validation: ValidationResult
-    auto_limit_applied: bool
-    is_destructive: bool
-    confirmed: bool
+
+    # When outcome is Answer:
+    sql_raw: str | None = None
+    sql_final: str | None = None
+    paraphrase: str | None = None
+    result: QueryResult | None = None
+    validation: ValidationResult | None = None
+    auto_limit_applied: bool = False
+    is_destructive: bool = False
+    confirmed: bool = False
     skipped_reason: str | None = None
+
+    @property
+    def state(self) -> str:
+        if isinstance(self.outcome, Answer):
+            return "ANSWER"
+        if isinstance(self.outcome, CannotAnswer):
+            return "CANNOT_ANSWER"
+        if isinstance(self.outcome, Clarify):
+            return "CLARIFY"
+        return "UNKNOWN"
 
 
 # Confirmation callback: receives the final SQL + paraphrase, returns True to proceed.
@@ -40,12 +67,17 @@ def _auto_confirm(_sql: str, _paraphrase: str | None) -> bool:
 
 
 class Pipeline:
-    """NL question → SQL → validate → paraphrase → confirm → execute → result.
+    """NL question → outcome → (if Answer) SQL → validate → paraphrase → confirm → execute.
 
     SQLite-specific in v1, but constructed from a generic LLMProvider so the
     LLM side is provider-agnostic. The confirmation callback abstracts UX so
     the same pipeline serves CLI (interactive prompt), MCP (return SQL to
     host model), and non-interactive (`--no-confirm` / auto_confirm).
+
+    The pipeline returns a three-state outcome: Answer (we have SQL and can
+    run it), CannotAnswer (the schema doesn't cover the question), or
+    Clarify (the question is ambiguous and we need a follow-up). Only the
+    Answer branch hits the validator / paraphrase / executor.
     """
 
     def __init__(
@@ -112,14 +144,29 @@ class Pipeline:
             # wants to surface this to the user.
             pass
 
-        sql_raw = generate_sql(
+        outcome = generate_outcome(
             self._provider,
             prompt,
             temperature=self._temperature,
             max_output_tokens=self._max_output_tokens,
         )
+
+        # CannotAnswer + Clarify short-circuit. For CannotAnswer we inject
+        # available_tables from the live schema so callers don't have to
+        # re-fetch it to suggest alternatives.
+        if isinstance(outcome, CannotAnswer):
+            outcome = CannotAnswer(
+                reason=outcome.reason,
+                available_tables=schema.table_names(),
+            )
+            return PipelineOutput(question=question, outcome=outcome, prompt=prompt)
+
+        if isinstance(outcome, Clarify):
+            return PipelineOutput(question=question, outcome=outcome, prompt=prompt)
+
+        # Answer branch — validate, paraphrase, confirm, execute.
         validation = validate_sql(
-            sql_raw,
+            outcome.sql,
             dialect=schema.dialect,
             allow_writes=allow_writes,
             max_rows=self._max_rows if self._auto_limit else None,
@@ -146,11 +193,12 @@ class Pipeline:
 
         return PipelineOutput(
             question=question,
-            sql_raw=sql_raw,
+            outcome=outcome,
+            prompt=prompt,
+            sql_raw=outcome.sql,
             sql_final=validation.sql,
             paraphrase=paraphrase,
             result=result,
-            prompt=prompt,
             validation=validation,
             auto_limit_applied=validation.auto_limit_applied,
             is_destructive=validation.is_destructive,

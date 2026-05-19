@@ -174,3 +174,57 @@ def test_pipeline_num_few_shot_one_truncates_examples(sample_db: Path) -> None:
     user_prompt = provider.calls[0][1].content
     assert "Example 1 question:" in user_prompt
     assert "Example 2 question:" not in user_prompt
+
+
+# Three-state outcome tests -------------------------------------------------
+
+def test_pipeline_cannot_answer_short_circuits(sample_db: Path) -> None:
+    from nl_db.generator import CannotAnswer
+
+    provider = CannedProvider(
+        "CANNOT_ANSWER: This database has no information about employees."
+    )
+    pipe = Pipeline(provider=provider, db_path=sample_db)
+    out = pipe.run("how many employees do we have?")
+
+    assert out.state == "CANNOT_ANSWER"
+    assert isinstance(out.outcome, CannotAnswer)
+    assert "employees" in out.outcome.reason.lower()
+    # Pipeline injects available_tables from the live schema
+    assert out.outcome.available_tables == ("transactions", "users")
+    # No SQL path was taken
+    assert out.sql_final is None
+    assert out.paraphrase is None
+    assert out.result is None
+    # Only one LLM call (no paraphrase, no SQL retry)
+    assert len(provider.calls) == 1
+
+
+def test_pipeline_clarify_short_circuits(sample_db: Path) -> None:
+    from nl_db.generator import Clarify
+
+    provider = CannedProvider(
+        "CLARIFY: Do you mean spending in the current calendar month or the last 30 days?"
+    )
+    pipe = Pipeline(provider=provider, db_path=sample_db)
+    out = pipe.run("how much did Alice spend recently?")
+
+    assert out.state == "CLARIFY"
+    assert isinstance(out.outcome, Clarify)
+    assert "calendar month" in out.outcome.question
+    assert out.sql_final is None
+    assert out.result is None
+    assert len(provider.calls) == 1
+
+
+def test_pipeline_answer_state_property(sample_db: Path) -> None:
+    from nl_db.generator import Answer
+
+    provider = CannedProvider(
+        "```sql\nSELECT id FROM users\n```",
+        "Lists user ids.",
+    )
+    out = Pipeline(provider=provider, db_path=sample_db).run("list ids")
+    assert out.state == "ANSWER"
+    assert isinstance(out.outcome, Answer)
+    assert out.outcome.sql.upper().startswith("SELECT")
