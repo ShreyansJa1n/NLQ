@@ -30,6 +30,9 @@ htmlcov/
 # untracked by default — uncomment to commit a shared team config.
 nl-db.toml
 
+# personal/working roadmap, kept local
+plan.md
+
 *.log
 ~/.local/share/nl-db/
 

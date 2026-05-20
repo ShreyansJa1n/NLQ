@@ -209,8 +209,6 @@ The Streamlit UI's sidebar **💾 Save to disk** button writes this file for you
 
 ## Design
 
-See [`plan.md`](plan.md) for the full architecture and roadmap.
-
 Key invariants:
 - **Schema-first prompting**: live schema is always injected — no stale snapshots.
 - **Three-state generator output**: every NL question resolves to `ANSWER` (with SQL), `CANNOT_ANSWER` (with reason + available tables), or `CLARIFY` (with a follow-up question). No silent hallucination.
