@@ -1,6 +1,8 @@
-# nl-db
+# NLQ — Natural Language Queries
 
-Natural language database querying. Privacy-first by design (on-device via Apple Intelligence), provider-agnostic by construction (any OpenAI-compatible endpoint, plus Anthropic and OpenAI directly), and exposable as an MCP server to any compatible client.
+Ask your database questions in plain English — privately, locally, and from anywhere. NLQ runs on top of any LLM you pick (Apple Intelligence on-device, Ollama, vLLM, Anthropic, or OpenAI), is read-only by default, and plugs straight into Claude Desktop / Cursor as an MCP server.
+
+> The CLI / Python package is named `nl-db` (predates the NLQ rename); the project as a product is **NLQ**.
 
 ## Quickstart
 
@@ -13,8 +15,8 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env      # Claude
 echo "OPENAI_API_KEY=sk-..." >> .env             # GPT
 # OR (for Ollama / Apple Intelligence shim / vLLM)
 export NL_DB_PROVIDER__NAME=openai_compatible
-export NL_DB_PROVIDER__BASE_URL=http://localhost:8080/v1
-export NL_DB_PROVIDER__MODEL=apple-intelligence
+export NL_DB_PROVIDER__BASE_URL=http://localhost:11434/v1
+export NL_DB_PROVIDER__MODEL=gemma2:2b
 
 # Inspect the schema
 uv run nl-db schema --db path/to/your.db
@@ -38,58 +40,155 @@ Every query:
 
 Writes (`INSERT`/`UPDATE`/`DELETE`/`DROP`/`ALTER`/`TRUNCATE`) are refused unless you pass `--allow-writes`.
 
+If the database can't answer a question, NLQ says so plainly (`CANNOT_ANSWER`) instead of hallucinating SQL. Ambiguous questions trigger a `CLARIFY` follow-up so the LLM can ask you a question back.
+
 ## Streamlit playground
 
-A session-scoped UI for experimentation — edit every config knob (provider, model, key, DB path, temperature, max tokens, paraphrase on/off, auto-LIMIT, few-shot count, …), inspect the schema, run NL queries, edit the generated SQL, and see results in a dataframe.
+A web UI for experimentation — edit every config knob (provider, model, key, DB path, temperature, max tokens, paraphrase on/off, auto-LIMIT, few-shot count, …), inspect the schema, ask questions, see results inline, and dig into the raw HTTP request/response with the debug toggle.
 
 ```bash
 uv run nl-db-ui
 # opens http://localhost:8501
 ```
 
-Nothing typed in the UI is written to disk — config edits are session-scoped. To persist, use `~/.config/nl-db/config.toml` or `.env`.
+Sidebar settings are session-scoped until you click **💾 Save to disk**, which persists them to `./nl-db.toml`. API keys are never written — secrets always stay in `.env` or env vars.
 
-## MCP server
+## Use NLQ with Claude Desktop
 
-`nl-db` also runs as an MCP stdio server, exposing four tools and a schema resource to any compatible client (Claude Desktop, Cursor, …):
+NLQ exposes itself as an [MCP](https://modelcontextprotocol.io) stdio server. Once registered with Claude Desktop, Claude can ask your database questions in natural language without ever writing SQL itself.
 
-| Tool | Purpose |
-| --- | --- |
-| `list_tables` | Every user-created table in the DB |
-| `describe_schema(table_name)` | Columns, types, PKs, FKs for one table |
-| `query_database(question)` | Full NL → SQL → result pipeline |
-| `run_sql(sql)` | Execute raw SQL (gated by `--allow-writes`) |
+### 1. Locate Claude Desktop's config file
 
-Resource: `db://schema/<table>` returns the same payload as `describe_schema`.
+```bash
+# macOS
+~/Library/Application\ Support/Claude/claude_desktop_config.json
 
-Register with Claude Desktop by adding to `claude_desktop_config.json`:
+# Windows
+%APPDATA%\Claude\claude_desktop_config.json
+```
+
+If the file doesn't exist yet, create it with `{}` as the contents.
+
+### 2. Add the NLQ entry
+
+Pick the snippet that matches the LLM provider you want Claude to use behind the scenes:
+
+#### Anthropic (Claude as the underlying NL→SQL model)
 
 ```json
 {
   "mcpServers": {
-    "nl-db": {
+    "nlq": {
       "command": "uv",
-      "args": ["--directory", "/absolute/path/to/nl-db", "run", "nl-db-mcp", "--db", "/absolute/path/to/your.db"],
-      "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }
+      "args": [
+        "--directory", "/absolute/path/to/nl-db",
+        "run", "nl-db-mcp",
+        "--db", "/absolute/path/to/your.db"
+      ],
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-...",
+        "NL_DB_PROVIDER__NAME": "anthropic",
+        "NL_DB_PROVIDER__MODEL": "claude-sonnet-4-5-20250929"
+      }
     }
   }
 }
 ```
 
-Full setup walkthrough in [`docs/setup.md`](docs/setup.md).
+#### OpenAI
+
+```json
+{
+  "mcpServers": {
+    "nlq": {
+      "command": "uv",
+      "args": [
+        "--directory", "/absolute/path/to/nl-db",
+        "run", "nl-db-mcp",
+        "--db", "/absolute/path/to/your.db"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "sk-...",
+        "NL_DB_PROVIDER__NAME": "openai",
+        "NL_DB_PROVIDER__MODEL": "gpt-4o-mini"
+      }
+    }
+  }
+}
+```
+
+#### Local / OpenAI-compatible (Ollama, Apple Intelligence shim, vLLM, LM Studio)
+
+```json
+{
+  "mcpServers": {
+    "nlq": {
+      "command": "uv",
+      "args": [
+        "--directory", "/absolute/path/to/nl-db",
+        "run", "nl-db-mcp",
+        "--db", "/absolute/path/to/your.db"
+      ],
+      "env": {
+        "NL_DB_PROVIDER__NAME": "openai_compatible",
+        "NL_DB_PROVIDER__BASE_URL": "http://localhost:11434/v1",
+        "NL_DB_PROVIDER__MODEL": "gemma2:2b",
+        "OPENAI_COMPATIBLE_API_KEY": "not-needed"
+      }
+    }
+  }
+}
+```
+
+If you already have an `nl-db.toml` set up locally (e.g. via the Streamlit playground's **Save to disk** button), simplify the `env` block to:
+
+```json
+"env": {
+  "NL_DB_CONFIG_FILE": "/absolute/path/to/nl-db/nl-db.toml",
+  "OPENAI_COMPATIBLE_API_KEY": "not-needed"
+}
+```
+
+### 3. Restart Claude Desktop
+
+Fully quit (`Cmd+Q` on macOS) and relaunch. Open a new chat — you should see the 🔌 plug icon show `nlq` connected with four tools available.
+
+### 4. Try it
+
+> *"What tables are in the database?"* — Claude calls `list_tables`.
+>
+> *"How much did Alice spend last month?"* — Claude calls `describe_database` to ground itself in the schema, then `query_database(question)` and returns the answer in plain English.
+
+NLQ returns one of three response shapes via `query_database`, so Claude knows whether it got an answer, a refusal (with the list of available tables), or a clarifying question to ask you back.
+
+### Power-user flag
+
+Add `"--expose-run-sql"` to `args` to register an extra `run_sql(sql)` tool that lets Claude execute SQL directly (bypassing the NL pipeline). Add `"--allow-writes"` alongside it to permit destructive statements. Both are off by default.
+
+If something goes wrong, Claude Desktop logs the MCP server's stderr at `~/Library/Logs/Claude/mcp-server-nlq.log`. The full setup walkthrough lives in [`docs/setup.md`](docs/setup.md).
+
+## MCP tool surface
+
+| Tool | Purpose |
+| --- | --- |
+| `list_tables()` | Every user-created table in the DB |
+| `describe_database()` | Full schema (every table, columns, FKs) in one call |
+| `describe_schema(table_name)` | Schema for one specific table |
+| `query_database(question, conversation_id?)` | Full NL → SQL → answer pipeline; supports multi-turn via `conversation_id` |
+| `run_sql(sql)` | Execute raw SQL (only when `--expose-run-sql` is set) |
+
+Resources: `db://schema` (full schema) and `db://schema/<table>` (per-table).
 
 ## Configuration
 
 Precedence: env vars > `.env` > `./nl-db.toml` (project-local) > defaults.
 
-The config file is **project-local** — it lives next to your code at `./nl-db.toml`. Override the location via `NL_DB_CONFIG_FILE=path/to/file.toml`.
-
 ```toml
 # ./nl-db.toml
 [provider]
-name = "anthropic"                 # "anthropic" | "openai" | "openai_compatible"
-model = "claude-sonnet-4-6"
-# base_url = "http://localhost:8080/v1"   # required if name = "openai_compatible"
+name = "openai_compatible"          # "anthropic" | "openai" | "openai_compatible"
+model = "gemma2:2b"
+base_url = "http://localhost:11434/v1"   # required if name = "openai_compatible"
 
 [limits]
 max_rows = 1000
@@ -98,34 +197,34 @@ max_prompt_tokens = 8000
 
 [generation]
 temperature = 0.0
-max_output_tokens = 512
+max_output_tokens = 2048
 paraphrase = true
 paraphrase_temperature = 0.0
-paraphrase_max_output_tokens = 128
+paraphrase_max_output_tokens = 256
 auto_limit = true
-num_few_shot = -1                  # -1 = all curated examples; 0 = none
+num_few_shot = -1                   # -1 = all curated examples; 0 = none
 ```
 
-The Streamlit UI has a **Save to disk** button in the sidebar that writes the current settings to `./nl-db.toml`. API keys are never written — secrets always stay in `.env` or env vars. `nl-db.toml` is gitignored by default (uncomment in `.gitignore` to share team config).
-
-API keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` — never write them into `config.toml`.
+The Streamlit UI's sidebar **💾 Save to disk** button writes this file for you. API keys are never written — they always come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` (env or `.env`).
 
 ## Design
 
-See [`plan.md`](plan.md) for the full architecture and the `/Users/shreyansjain/.claude/plans/...` build plan.
+See [`plan.md`](plan.md) for the full architecture and roadmap.
 
 Key invariants:
 - **Schema-first prompting**: live schema is always injected — no stale snapshots.
-- **SQL transparency**: generated SQL is shown to the user (or the host LLM, via MCP) before execution.
+- **Three-state generator output**: every NL question resolves to `ANSWER` (with SQL), `CANNOT_ANSWER` (with reason + available tables), or `CLARIFY` (with a follow-up question). No silent hallucination.
+- **NL-friendly errors**: raw exceptions are humanized before reaching the user.
+- **SQL transparency**: generated SQL is shown to the user (or the host LLM, via MCP) before/alongside execution.
 - **Read-only by default**: writes require an explicit flag.
 - **Provider-agnostic**: every LLM call goes through `LLMProvider` Protocol. Adding a new backend is one file.
-- **Eval-driven**: 30 NL→SQL pairs (`eval/dataset.yaml`) score every change.
+- **Eval-driven**: 35 NL→SQL/state pairs (`eval/dataset.yaml`) score every change.
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest                          # 72 tests
+uv run pytest                          # 132 tests, <1s
 uv run ruff check
 uv run mypy src/
 
@@ -147,9 +246,9 @@ uv run python -m eval.runner --limit 5
 - [x] Pipeline orchestrator
 - [x] CLI (`nl-db query`, `nl-db schema`, `nl-db config`)
 - [x] Sample database fixture
-- [x] 30-question eval harness
-- [x] MCP stdio server (4 tools + schema resource)
-- [x] Streamlit playground UI (`nl-db-ui`)
+- [x] 35-question eval harness with three-state coverage
+- [x] MCP stdio server (4 default tools + 1 opt-in + 2 schema resources)
+- [x] Streamlit playground UI (`nl-db-ui`) with debug toggle
 - [x] Setup docs
 - [x] Three-state generator output (`ANSWER` / `CANNOT_ANSWER` / `CLARIFY`)
 - [x] NL-first MCP surface (`describe_database`, top-level `db://schema` resource, `run_sql` behind `--expose-run-sql`)
@@ -160,4 +259,4 @@ uv run python -m eval.runner --limit 5
 - PostgreSQL + MySQL adapters (drop into the existing `SchemaExtractor` Protocol slot)
 - NL result summarizer (`--summarize`)
 - Multi-connection config manager
-- Apple Intelligence Swift HTTP shim (provided by a third-party project; nl-db is already compatible via the `openai_compatible` provider)
+- Apple Intelligence Swift HTTP shim (provided by a third-party project; NLQ is already compatible via the `openai_compatible` provider)
