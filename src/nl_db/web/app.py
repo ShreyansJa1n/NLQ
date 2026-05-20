@@ -39,7 +39,7 @@ from nl_db.llm.provider import LLMProvider
 from nl_db.pipeline import Pipeline, PipelineOutput
 from nl_db.schema.base import render_for_prompt
 from nl_db.schema.sqlite import SQLiteSchemaExtractor
-from nl_db.validator import SQLValidationError, validate_sql
+from nl_db.validator import SQLValidationError
 
 
 def _make_capturing_http_client(captures: list[dict[str, Any]]) -> httpx.Client:
@@ -481,21 +481,26 @@ with st.sidebar:
             key="max_output_tokens",
         )
         st.checkbox("Run paraphrase pass", key="paraphrase_enabled")
-        if st.session_state.paraphrase_enabled:
-            st.slider(
-                "Temperature (paraphrase)",
-                0.0,
-                1.5,
-                key="paraphrase_temperature",
-                step=0.05,
-            )
-            st.number_input(
-                "Max output tokens (paraphrase)",
-                min_value=32,
-                max_value=512,
-                step=16,
-                key="paraphrase_max_output_tokens",
-            )
+        # Always render the sub-widgets so Streamlit doesn't clear their keys
+        # from session_state when paraphrase is toggled off. Disable when off
+        # so they look obviously inactive.
+        _para_off = not st.session_state.paraphrase_enabled
+        st.slider(
+            "Temperature (paraphrase)",
+            0.0,
+            1.5,
+            key="paraphrase_temperature",
+            step=0.05,
+            disabled=_para_off,
+        )
+        st.number_input(
+            "Max output tokens (paraphrase)",
+            min_value=32,
+            max_value=512,
+            step=16,
+            key="paraphrase_max_output_tokens",
+            disabled=_para_off,
+        )
         st.slider(
             "Few-shot examples (-1 = default, 0 = none)",
             min_value=-1,
@@ -570,8 +575,8 @@ with tab_query:
                 height=80,
             )
         with col_gen:
-            generate_clicked = st.button(
-                "Generate SQL", type="primary", use_container_width=True
+            ask_clicked = st.button(
+                "Ask", type="primary", use_container_width=True
             )
         with col_preview:
             preview_clicked = st.button(
@@ -580,7 +585,7 @@ with tab_query:
                 help=(
                     "Builds the prompt and shows the exact HTTP request body "
                     "nl-db would send — no LLM call is made. Useful when your "
-                    "endpoint is misconfigured and Generate SQL fails."
+                    "endpoint is misconfigured and Ask fails."
                 ),
             )
 
@@ -640,37 +645,51 @@ with tab_query:
             except Exception as e:  # noqa: BLE001
                 st.error(f"{type(e).__name__}: {e}", icon="❌")
 
-        if generate_clicked and question.strip():
+        if ask_clicked and question.strip():
             st.session_state.last_captures = []
             st.session_state.preview_only = False
-            with st.spinner("Calling LLM..."):
+            with st.spinner("Asking the database…"):
                 try:
                     from nl_db.generator import Answer, CannotAnswer, Clarify
 
                     pipeline, captures = _build_pipeline()
                     st.session_state.last_captures = captures
-                    # confirm=lambda False: validates + paraphrases on the
-                    # Answer branch but skips execution. Run SQL is a separate
-                    # button (with edit-in-between), so we don't want to
-                    # execute eagerly here.
+                    # confirm=lambda True: run the full pipeline including
+                    # execution. Read-only requests are inherently safe;
+                    # destructive SQL is already blocked by the validator
+                    # unless Allow writes is checked (an explicit opt-in).
                     pout = pipeline.run(
                         question,
                         allow_writes=bool(st.session_state.allow_writes),
-                        confirm=lambda _sql, _para: False,
+                        confirm=lambda _sql, _para: True,
                     )
                     if isinstance(pout.outcome, Answer):
                         assert pout.sql_final is not None
+                        assert pout.result is not None
                         st.session_state.last_output = {
                             "kind": "answer",
                             "question": question,
-                            "sql_raw": pout.sql_raw,
                             "sql_final": pout.sql_final,
                             "paraphrase": pout.paraphrase,
                             "is_destructive": pout.is_destructive,
                             "auto_limit_applied": pout.auto_limit_applied,
                             "approx_prompt_tokens": pout.prompt.approx_tokens,
+                            "columns": list(pout.result.columns),
+                            "rows": [list(r) for r in pout.result.rows],
+                            "row_count": pout.result.row_count,
+                            "truncated": pout.result.truncated,
                         }
-                        st.session_state.edited_sql = pout.sql_final
+                        st.session_state.history.insert(
+                            0,
+                            HistoryEntry(
+                                ts=time.time(),
+                                question=question,
+                                sql=pout.sql_final,
+                                paraphrase=pout.paraphrase,
+                                row_count=pout.result.row_count,
+                                success=True,
+                            ),
+                        )
                     elif isinstance(pout.outcome, CannotAnswer):
                         st.session_state.last_output = {
                             "kind": "cannot_answer",
@@ -679,7 +698,6 @@ with tab_query:
                             "available_tables": list(pout.outcome.available_tables),
                             "approx_prompt_tokens": pout.prompt.approx_tokens,
                         }
-                        st.session_state.edited_sql = None
                     elif isinstance(pout.outcome, Clarify):
                         st.session_state.last_output = {
                             "kind": "clarify",
@@ -687,9 +705,8 @@ with tab_query:
                             "clarify_question": pout.outcome.question,
                             "approx_prompt_tokens": pout.prompt.approx_tokens,
                         }
-                        st.session_state.edited_sql = None
                 except SQLValidationError as e:
-                    st.error(f"Validation refused this SQL: {e}", icon="🛑")
+                    st.error(_explain_llm_error(e), icon="🛑")
                     st.session_state.last_output = None
                 except Exception as e:  # noqa: BLE001
                     st.error(_explain_llm_error(e), icon="❌")
@@ -709,136 +726,58 @@ with tab_query:
                 st.session_state.question_input = (
                     f"{out['question']}\n\nClarification: {clarification}"
                 )
-                # Trigger generation on next rerun by setting a flag
-                # — simpler than calling _build_pipeline() inline here.
                 st.session_state.last_output = None
                 st.session_state.last_captures = []
                 st.rerun()
         elif out and out.get("kind") == "answer":
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Prompt tokens (approx)", out["approx_prompt_tokens"])
-            c2.metric(
+            # Result-first: dataframe + meta row at the top.
+            if out["columns"]:
+                df = pd.DataFrame(out["rows"], columns=out["columns"])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Query produced no columns.")
+
+            meta_a, meta_b, meta_c = st.columns(3)
+            meta_a.metric("Rows", out["row_count"])
+            meta_b.metric(
+                "Truncated", "yes" if out["truncated"] else "no"
+            )
+            meta_c.metric(
                 "Auto-LIMIT",
                 "applied" if out["auto_limit_applied"] else "skipped",
             )
-            c3.metric(
-                "Type", "destructive" if out["is_destructive"] else "read-only"
-            )
 
-            st.subheader("Generated SQL")
-            st.caption("Edit if you'd like before running.")
-            st.session_state.edited_sql = st.text_area(
-                "SQL",
-                value=st.session_state.edited_sql or out["sql_final"],
-                height=200,
-                label_visibility="collapsed",
-                key="sql_edit_box",
-            )
-
-            if out["paraphrase"]:
-                st.subheader("In plain English")
-                st.success(out["paraphrase"])
-
-            run_col, _ = st.columns([1, 5])
-            with run_col:
-                run_clicked = st.button(
-                    "Run SQL",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=not st.session_state.edited_sql,
+            # SQL + paraphrase live in a collapsible section below — the user
+            # can verify what we actually ran (SQL transparency invariant)
+            # without having SQL be the primary visual focus.
+            with st.expander("How I answered (SQL + paraphrase)", expanded=False):
+                if out["paraphrase"]:
+                    st.success(out["paraphrase"], icon="🗣️")
+                st.code(out["sql_final"], language="sql")
+                st.caption(
+                    f"~{out['approx_prompt_tokens']} prompt tokens · "
+                    f"{'destructive' if out['is_destructive'] else 'read-only'}"
                 )
 
-            if run_clicked:
-                try:
-                    pipeline, _ = _build_pipeline()
-                    sql_to_run = st.session_state.edited_sql or out["sql_final"]
-                    # Re-validate edited SQL with the same allow_writes setting.
-                    revalidation = validate_sql(
-                        sql_to_run,
-                        dialect=pipeline.schema().dialect,
-                        allow_writes=bool(st.session_state.allow_writes),
-                        max_rows=(
-                            int(st.session_state.max_rows)
-                            if st.session_state.auto_limit
-                            else None
-                        ),
-                    )
-                    result = pipeline._executor.execute(revalidation.sql)  # noqa: SLF001
-                    st.subheader("Result")
-                    if result.columns:
-                        df = pd.DataFrame(result.rows, columns=list(result.columns))
-                        st.dataframe(df, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("Query produced no columns.")
-                    meta_a, meta_b, meta_c = st.columns(3)
-                    meta_a.metric("Rows", result.row_count)
-                    meta_b.metric(
-                        "Truncated", "yes" if result.truncated else "no"
-                    )
-                    meta_c.metric(
-                        "Auto-LIMIT",
-                        "applied" if revalidation.auto_limit_applied else "skipped",
-                    )
-
-                    with st.expander("Raw JSON"):
-                        st.code(
-                            json.dumps(
-                                {
-                                    "columns": list(result.columns),
-                                    "rows": [list(r) for r in result.rows],
-                                    "row_count": result.row_count,
-                                    "truncated": result.truncated,
-                                },
-                                default=str,
-                                indent=2,
-                            ),
-                            language="json",
-                        )
-
-                    st.session_state.history.insert(
-                        0,
-                        HistoryEntry(
-                            ts=time.time(),
-                            question=out["question"],
-                            sql=revalidation.sql,
-                            paraphrase=out["paraphrase"],
-                            row_count=result.row_count,
-                            success=True,
-                        ),
-                    )
-                except SQLValidationError as e:
-                    st.error(f"Validation refused this SQL: {e}", icon="🛑")
-                    st.session_state.history.insert(
-                        0,
-                        HistoryEntry(
-                            ts=time.time(),
-                            question=out["question"],
-                            sql=st.session_state.edited_sql or out["sql_final"],
-                            paraphrase=out["paraphrase"],
-                            row_count=None,
-                            success=False,
-                            error=str(e),
-                        ),
-                    )
-                except Exception as e:  # noqa: BLE001
-                    st.error(_explain_llm_error(e), icon="❌")
-                    st.session_state.history.insert(
-                        0,
-                        HistoryEntry(
-                            ts=time.time(),
-                            question=out["question"],
-                            sql=st.session_state.edited_sql or out["sql_final"],
-                            paraphrase=out["paraphrase"],
-                            row_count=None,
-                            success=False,
-                            error=f"{type(e).__name__}: {e}",
-                        ),
-                    )
+            with st.expander("Raw JSON"):
+                st.code(
+                    json.dumps(
+                        {
+                            "columns": out["columns"],
+                            "rows": out["rows"],
+                            "row_count": out["row_count"],
+                            "truncated": out["truncated"],
+                        },
+                        default=str,
+                        indent=2,
+                    ),
+                    language="json",
+                )
 
     # Render Debug expander INTO the slot we reserved up high (right under
     # the buttons). Writing here, at the very end of the tab, guarantees the
     # session_state.last_captures has already been populated by whichever
-    # handler ran above (Preview only, Generate SQL, or Run SQL).
+    # handler ran above (Preview only or Ask).
     with debug_slot:
         captures: list[dict[str, Any]] = st.session_state.get(
             "last_captures", []
