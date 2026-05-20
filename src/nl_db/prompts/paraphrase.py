@@ -9,7 +9,7 @@ def paraphrase_sql(
     sql: str,
     *,
     temperature: float = 0.0,
-    max_output_tokens: int = 128,
+    max_output_tokens: int = 512,
 ) -> str:
     """Ask the LLM to NL-explain a SQL statement in one short sentence.
 

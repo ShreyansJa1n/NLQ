@@ -200,7 +200,7 @@ temperature = 0.0
 max_output_tokens = 2048
 paraphrase = true
 paraphrase_temperature = 0.0
-paraphrase_max_output_tokens = 256
+paraphrase_max_output_tokens = 512
 auto_limit = true
 num_few_shot = -1                   # -1 = all curated examples; 0 = none
 ```

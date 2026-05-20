@@ -129,7 +129,7 @@ def generate_outcome(
     prompt: BuiltPrompt,
     *,
     temperature: float = 0.0,
-    max_output_tokens: int = 512,
+    max_output_tokens: int = 2048,
 ) -> GenerationOutcome:
     """Call the provider, parse the response into a GenerationOutcome."""
     result = provider.chat(
@@ -145,7 +145,7 @@ def generate_sql(
     prompt: BuiltPrompt,
     *,
     temperature: float = 0.0,
-    max_output_tokens: int = 512,
+    max_output_tokens: int = 2048,
 ) -> str:
     """Back-compat shim: call generate_outcome and return SQL if the outcome
     is Answer, otherwise raise SQLExtractionError. New code should call

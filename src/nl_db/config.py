@@ -47,10 +47,10 @@ class GenerationConfig(BaseModel):
     """Tuning knobs exposed by the Streamlit playground."""
 
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    max_output_tokens: int = Field(default=512, ge=32, le=8192)
+    max_output_tokens: int = Field(default=2048, ge=32, le=8192)
     paraphrase: bool = True
     paraphrase_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    paraphrase_max_output_tokens: int = Field(default=128, ge=32, le=2048)
+    paraphrase_max_output_tokens: int = Field(default=512, ge=32, le=2048)
     auto_limit: bool = True
     num_few_shot: int = Field(default=-1, ge=-1, le=20)  # -1 = use builder default
 

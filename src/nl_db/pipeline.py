@@ -94,9 +94,9 @@ class Pipeline:
         paraphrase: bool = True,
         # Generation tuning knobs (exposed for the Streamlit playground)
         temperature: float = 0.0,
-        max_output_tokens: int = 512,
+        max_output_tokens: int = 2048,
         paraphrase_temperature: float = 0.0,
-        paraphrase_max_output_tokens: int = 128,
+        paraphrase_max_output_tokens: int = 512,
         auto_limit: bool = True,
         num_few_shot: int | None = None,
     ) -> None:
