@@ -304,6 +304,7 @@ def _init_state() -> None:
     st.session_state.edited_sql: str | None = None
     st.session_state.last_captures: list[dict[str, Any]] = []
     st.session_state.preview_only: bool = False
+    st.session_state.debug_enabled: bool = False
 
 
 def _snapshot_settings_from_state() -> Settings:
@@ -439,6 +440,16 @@ with st.sidebar:
                 del st.session_state[k]
             st.rerun()
 
+    st.toggle(
+        "🐞 Show debug panels",
+        key="debug_enabled",
+        help=(
+            "When on: adds a 'Preview only' button next to Ask, and shows a "
+            "Debug expander with the exact HTTP request + LLM response after "
+            "every call. Off by default to keep the UI clean."
+        ),
+    )
+
     with st.expander("Database", expanded=True):
         st.text_input(
             "SQLite path",
@@ -566,7 +577,15 @@ with tab_query:
     if not st.session_state.db_path:
         st.info("Set a SQLite path in the sidebar to get started.", icon="📁")
     else:
-        col_q, col_gen, col_preview = st.columns([5, 1, 1], vertical_alignment="bottom")
+        debug_on = bool(st.session_state.get("debug_enabled", False))
+        # Layout: drop the third column when debug is off so Ask stretches.
+        if debug_on:
+            col_q, col_gen, col_preview = st.columns(
+                [5, 1, 1], vertical_alignment="bottom"
+            )
+        else:
+            col_q, col_gen = st.columns([5, 1], vertical_alignment="bottom")
+            col_preview = None
         with col_q:
             question = st.text_area(
                 "Question",
@@ -578,16 +597,19 @@ with tab_query:
             ask_clicked = st.button(
                 "Ask", type="primary", use_container_width=True
             )
-        with col_preview:
-            preview_clicked = st.button(
-                "Preview only",
-                use_container_width=True,
-                help=(
-                    "Builds the prompt and shows the exact HTTP request body "
-                    "nl-db would send — no LLM call is made. Useful when your "
-                    "endpoint is misconfigured and Ask fails."
-                ),
-            )
+        if col_preview is not None:
+            with col_preview:
+                preview_clicked = st.button(
+                    "Preview only",
+                    use_container_width=True,
+                    help=(
+                        "Builds the prompt and shows the exact HTTP request body "
+                        "nl-db would send — no LLM call is made. Useful when your "
+                        "endpoint is misconfigured and Ask fails."
+                    ),
+                )
+        else:
+            preview_clicked = False
 
         # Reserve a visual slot for the Debug expander right under the buttons.
         # We write into it AT THE END of the tab block — after both Preview
@@ -779,9 +801,10 @@ with tab_query:
     # session_state.last_captures has already been populated by whichever
     # handler ran above (Preview only or Ask).
     with debug_slot:
-        captures: list[dict[str, Any]] = st.session_state.get(
-            "last_captures", []
-        )
+        if not st.session_state.get("debug_enabled", False):
+            captures = []
+        else:
+            captures = st.session_state.get("last_captures", [])
         if captures:
             is_preview = bool(st.session_state.get("preview_only", False))
             label = (
