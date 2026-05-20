@@ -584,6 +584,14 @@ with tab_query:
                 ),
             )
 
+        # Reserve a visual slot for the Debug expander right under the buttons.
+        # We write into it AT THE END of the tab block — after both Preview
+        # and Generate SQL handlers have populated session_state.last_captures.
+        # Using a container (vs. rendering inline) decouples render position
+        # from render time, so a captures-list populated later in the same
+        # script run still shows up high in the layout.
+        debug_slot = st.container()
+
         if preview_clicked and question.strip():
             try:
                 from nl_db.prompts.builder import build_sql_prompt
@@ -631,110 +639,6 @@ with tab_query:
                 )
             except Exception as e:  # noqa: BLE001
                 st.error(f"{type(e).__name__}: {e}", icon="❌")
-
-        # Debug expander — rendered ALWAYS when we have a captured/previewed
-        # request, regardless of whether the LLM call succeeded, failed, or
-        # was a dry-run preview. Position is intentional: right under the
-        # buttons so a failing call doesn't bury its own diagnostics.
-        captures: list[dict[str, Any]] = st.session_state.get("last_captures", [])
-        if captures:
-            is_preview = bool(st.session_state.get("preview_only", False))
-            label = (
-                f"🐞 Preview: {len(captures)} request body (no call made)"
-                if is_preview
-                else f"🐞 Debug: {len(captures)} LLM API call(s) — request body + curl"
-            )
-            with st.expander(label, expanded=True):
-                if is_preview:
-                    st.caption(
-                        "This is the exact JSON nl-db would POST. Verify "
-                        "`model`, headers, and URL match what your server expects."
-                    )
-                labels = [
-                    "SQL generation" if i == 0 else "Paraphrase"
-                    for i in range(len(captures))
-                ]
-                for i, (lab, req) in enumerate(
-                    zip(labels, captures, strict=False)
-                ):
-                    st.markdown(f"**Call {i + 1}: {lab}**")
-                    status_suffix = (
-                        f"  →  HTTP {req['response_status']}"
-                        if "response_status" in req
-                        else ""
-                    )
-                    st.code(
-                        f"{req['method']} {req['url']}{status_suffix}",
-                        language="http",
-                    )
-
-                    has_response = "response_body" in req
-                    tab_names = ["Request body", "Headers", "curl"]
-                    if has_response:
-                        tab_names = [
-                            "Response text",
-                            "Response (full)",
-                            "Request body",
-                            "Headers",
-                            "curl",
-                        ]
-                    tabs = st.tabs(tab_names)
-
-                    if has_response:
-                        # Tab 1: just the LLM's text content, prominent.
-                        with tabs[0]:
-                            text = req.get("response_text")
-                            if text:
-                                st.caption(
-                                    "This is what the LLM said. If you're "
-                                    "seeing 'no SQL' errors, this is where to "
-                                    "verify the model's actual output."
-                                )
-                                st.code(text, language="markdown")
-                            else:
-                                st.warning(
-                                    "Could not extract a text field from "
-                                    "the response. See **Response (full)**."
-                                )
-                                st.json(
-                                    req["response_body"]
-                                    if isinstance(req["response_body"], (dict, list))
-                                    else {"raw": str(req["response_body"])}
-                                )
-                        # Tab 2: full parsed JSON response body.
-                        with tabs[1]:
-                            if isinstance(req["response_body"], (dict, list)):
-                                st.code(
-                                    json.dumps(req["response_body"], indent=2),
-                                    language="json",
-                                )
-                            else:
-                                st.code(str(req["response_body"]))
-
-                    # Remaining tabs: request body, headers, curl (offsets differ
-                    # depending on whether the response tabs are present).
-                    offset = 2 if has_response else 0
-                    with tabs[offset]:
-                        if isinstance(req["body"], (dict, list)):
-                            st.code(
-                                json.dumps(req["body"], indent=2),
-                                language="json",
-                            )
-                        else:
-                            st.code(str(req["body"]))
-                    with tabs[offset + 1]:
-                        st.code(
-                            "\n".join(
-                                f"{k}: {v}" for k, v in req["headers"].items()
-                            )
-                        )
-                    with tabs[offset + 2]:
-                        st.caption(
-                            "Authorization is redacted — fill in your key before running."
-                        )
-                        st.code(_curl_equivalent(req), language="bash")
-                    if i < len(captures) - 1:
-                        st.divider()
 
         if generate_clicked and question.strip():
             st.session_state.last_captures = []
@@ -931,8 +835,115 @@ with tab_query:
                         ),
                     )
 
+    # Render Debug expander INTO the slot we reserved up high (right under
+    # the buttons). Writing here, at the very end of the tab, guarantees the
+    # session_state.last_captures has already been populated by whichever
+    # handler ran above (Preview only, Generate SQL, or Run SQL).
+    with debug_slot:
+        captures: list[dict[str, Any]] = st.session_state.get(
+            "last_captures", []
+        )
+        if captures:
+            is_preview = bool(st.session_state.get("preview_only", False))
+            label = (
+                f"🐞 Preview: {len(captures)} request body (no call made)"
+                if is_preview
+                else f"🐞 Debug: {len(captures)} LLM API call(s) — request + response"
+            )
+            with st.expander(label, expanded=True):
+                if is_preview:
+                    st.caption(
+                        "This is the exact JSON nl-db would POST. Verify "
+                        "`model`, headers, and URL match what your server expects."
+                    )
+                call_labels = [
+                    "SQL generation" if i == 0 else "Paraphrase"
+                    for i in range(len(captures))
+                ]
+                for i, (lab, req) in enumerate(
+                    zip(call_labels, captures, strict=False)
+                ):
+                    st.markdown(f"**Call {i + 1}: {lab}**")
+                    status_suffix = (
+                        f"  →  HTTP {req['response_status']}"
+                        if "response_status" in req
+                        else ""
+                    )
+                    st.code(
+                        f"{req['method']} {req['url']}{status_suffix}",
+                        language="http",
+                    )
 
-# --- Schema tab ------------------------------------------------------------
+                    has_response = "response_body" in req
+                    tab_names = ["Request body", "Headers", "curl"]
+                    if has_response:
+                        tab_names = [
+                            "Response text",
+                            "Response (full)",
+                            "Request body",
+                            "Headers",
+                            "curl",
+                        ]
+                    tabs = st.tabs(tab_names)
+
+                    if has_response:
+                        with tabs[0]:
+                            text = req.get("response_text")
+                            if text:
+                                st.caption(
+                                    "What the LLM actually said. If you're "
+                                    "seeing 'no SQL' errors, verify here."
+                                )
+                                st.code(text, language="markdown")
+                            else:
+                                st.warning(
+                                    "The response had no extractable text "
+                                    "field (e.g. `choices[0].message.content` "
+                                    "was empty). Almost always means the shim "
+                                    "or model emitted nothing — increase "
+                                    "max_output_tokens, check the shim's "
+                                    "non-streaming path, or try a different "
+                                    "model."
+                                )
+                                st.json(
+                                    req["response_body"]
+                                    if isinstance(req["response_body"], (dict, list))
+                                    else {"raw": str(req["response_body"])}
+                                )
+                        with tabs[1]:
+                            if isinstance(req["response_body"], (dict, list)):
+                                st.code(
+                                    json.dumps(req["response_body"], indent=2),
+                                    language="json",
+                                )
+                            else:
+                                st.code(str(req["response_body"]))
+
+                    offset = 2 if has_response else 0
+                    with tabs[offset]:
+                        if isinstance(req["body"], (dict, list)):
+                            st.code(
+                                json.dumps(req["body"], indent=2),
+                                language="json",
+                            )
+                        else:
+                            st.code(str(req["body"]))
+                    with tabs[offset + 1]:
+                        st.code(
+                            "\n".join(
+                                f"{k}: {v}" for k, v in req["headers"].items()
+                            )
+                        )
+                    with tabs[offset + 2]:
+                        st.caption(
+                            "Authorization is redacted — fill in your key before running."
+                        )
+                        st.code(_curl_equivalent(req), language="bash")
+                    if i < len(captures) - 1:
+                        st.divider()
+
+
+# --- Chat tab --------------------------------------------------------------
 
 with tab_chat:
     if not st.session_state.db_path:
