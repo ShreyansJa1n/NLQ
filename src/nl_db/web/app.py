@@ -72,10 +72,59 @@ def _make_capturing_http_client(captures: list[dict[str, Any]]) -> httpx.Client:
             }
         )
 
+    def _response_hook(response: httpx.Response) -> None:
+        # response.read() populates response.content; httpx caches it so the
+        # caller (the openai/anthropic SDK) can still .json() it.
+        try:
+            response.read()
+        except Exception:  # noqa: BLE001
+            return
+        body: Any
+        try:
+            body = json.loads(response.content)
+        except Exception:  # noqa: BLE001
+            body = response.content.decode("utf-8", errors="replace")
+        if captures:
+            # Attach to the most recently captured request — request hook
+            # fires immediately before the network call, so the last entry
+            # is the one this response belongs to.
+            captures[-1]["response_status"] = response.status_code
+            captures[-1]["response_body"] = body
+            captures[-1]["response_text"] = _extract_response_text(body)
+
     return httpx.Client(
-        event_hooks={"request": [_hook]},
+        event_hooks={"request": [_hook], "response": [_response_hook]},
         timeout=httpx.Timeout(60.0),
     )
+
+
+def _extract_response_text(body: Any) -> str | None:
+    """Pull the LLM's text content out of a parsed response body.
+
+    Handles OpenAI chat-completions and Anthropic messages shapes. Returns
+    None if the body doesn't match a known shape (e.g. error response).
+    """
+    if not isinstance(body, dict):
+        return None
+    # OpenAI: {"choices": [{"message": {"content": "..."}}]}
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices:
+        msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+    # Anthropic: {"content": [{"type": "text", "text": "..."}, ...]}
+    content_blocks = body.get("content")
+    if isinstance(content_blocks, list):
+        parts = [
+            b.get("text", "")
+            for b in content_blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        if parts:
+            return "".join(parts)
+    return None
 
 
 def _preview_outgoing_request(
@@ -609,11 +658,63 @@ with tab_query:
                     zip(labels, captures, strict=False)
                 ):
                     st.markdown(f"**Call {i + 1}: {lab}**")
-                    st.code(f"{req['method']} {req['url']}", language="http")
-                    body_tab, headers_tab, curl_tab = st.tabs(
-                        ["Body", "Headers", "curl"]
+                    status_suffix = (
+                        f"  →  HTTP {req['response_status']}"
+                        if "response_status" in req
+                        else ""
                     )
-                    with body_tab:
+                    st.code(
+                        f"{req['method']} {req['url']}{status_suffix}",
+                        language="http",
+                    )
+
+                    has_response = "response_body" in req
+                    tab_names = ["Request body", "Headers", "curl"]
+                    if has_response:
+                        tab_names = [
+                            "Response text",
+                            "Response (full)",
+                            "Request body",
+                            "Headers",
+                            "curl",
+                        ]
+                    tabs = st.tabs(tab_names)
+
+                    if has_response:
+                        # Tab 1: just the LLM's text content, prominent.
+                        with tabs[0]:
+                            text = req.get("response_text")
+                            if text:
+                                st.caption(
+                                    "This is what the LLM said. If you're "
+                                    "seeing 'no SQL' errors, this is where to "
+                                    "verify the model's actual output."
+                                )
+                                st.code(text, language="markdown")
+                            else:
+                                st.warning(
+                                    "Could not extract a text field from "
+                                    "the response. See **Response (full)**."
+                                )
+                                st.json(
+                                    req["response_body"]
+                                    if isinstance(req["response_body"], (dict, list))
+                                    else {"raw": str(req["response_body"])}
+                                )
+                        # Tab 2: full parsed JSON response body.
+                        with tabs[1]:
+                            if isinstance(req["response_body"], (dict, list)):
+                                st.code(
+                                    json.dumps(req["response_body"], indent=2),
+                                    language="json",
+                                )
+                            else:
+                                st.code(str(req["response_body"]))
+
+                    # Remaining tabs: request body, headers, curl (offsets differ
+                    # depending on whether the response tabs are present).
+                    offset = 2 if has_response else 0
+                    with tabs[offset]:
                         if isinstance(req["body"], (dict, list)):
                             st.code(
                                 json.dumps(req["body"], indent=2),
@@ -621,13 +722,13 @@ with tab_query:
                             )
                         else:
                             st.code(str(req["body"]))
-                    with headers_tab:
+                    with tabs[offset + 1]:
                         st.code(
                             "\n".join(
                                 f"{k}: {v}" for k, v in req["headers"].items()
                             )
                         )
-                    with curl_tab:
+                    with tabs[offset + 2]:
                         st.caption(
                             "Authorization is redacted — fill in your key before running."
                         )
