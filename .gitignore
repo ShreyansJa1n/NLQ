@@ -33,6 +33,10 @@ nl-db.toml
 # personal/working roadmap, kept local
 plan.md
 
+# stray exports of CLAUDE.md / plan.md (kept local, not tracked)
+CLAUDE.pdf
+*.pdf
+
 *.log
 ~/.local/share/nl-db/
 
