@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import anthropic
 
-from .provider import ChatResult, Message
+from .provider import ChatResult, Message, ToolCall, ToolDef
 
 
 class AnthropicProvider:
@@ -26,22 +26,10 @@ class AnthropicProvider:
         *,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
-        tools: tuple[Any, ...] | None = None,
+        tools: tuple[ToolDef, ...] | None = None,
     ) -> ChatResult:
-        # Tools are wired through in the next commit (anthropic tool-calling).
-        # Until then, accepting the kwarg keeps the Protocol consistent.
-        if tools:
-            from .provider import ToolsNotSupportedError
-
-            raise ToolsNotSupportedError(
-                "Anthropic tool-calling not yet wired in this provider."
-            )
         system_parts = [m.content for m in messages if m.role == "system"]
-        convo = [
-            {"role": m.role, "content": m.content}
-            for m in messages
-            if m.role != "system"
-        ]
+        convo = _build_anthropic_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_output_tokens,
@@ -50,22 +38,80 @@ class AnthropicProvider:
         }
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in tools
+            ]
 
         response = self._client.messages.create(**kwargs)
 
         text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
         for block in response.content:
-            if getattr(block, "type", "") == "text":
+            btype = getattr(block, "type", "")
+            if btype == "text":
                 text_parts.append(cast(str, getattr(block, "text", "")))
+            elif btype == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=cast(str, getattr(block, "id", "")),
+                        name=cast(str, getattr(block, "name", "")),
+                        arguments=cast(dict[str, Any], getattr(block, "input", {}) or {}),
+                    )
+                )
         text = "".join(text_parts)
 
         usage = getattr(response, "usage", None)
+        stop_reason = getattr(response, "stop_reason", None)
         return ChatResult(
             text=text,
             input_tokens=getattr(usage, "input_tokens", None) if usage else None,
             output_tokens=getattr(usage, "output_tokens", None) if usage else None,
+            tool_calls=tuple(tool_calls),
+            stop_reason=stop_reason,
             provider_meta={
                 "model": self._model,
-                "stop_reason": getattr(response, "stop_reason", None),
+                "stop_reason": stop_reason,
             },
         )
+
+
+def _build_anthropic_messages(messages: list[Message]) -> list[dict[str, Any]]:
+    """Translate our Message list into Anthropic's content-block format.
+
+    Anthropic doesn't have a 'tool' role — tool results come back as a
+    `user` message whose content includes one or more `tool_result` blocks
+    referencing the original `tool_use_id`. Group consecutive role="tool"
+    messages into a single user message so the wire format stays compact.
+
+    Plain user/assistant text messages translate 1:1 with string content.
+    """
+    out: list[dict[str, Any]] = []
+    pending_tool_results: list[dict[str, Any]] = []
+
+    def flush_tool_results() -> None:
+        if pending_tool_results:
+            out.append({"role": "user", "content": list(pending_tool_results)})
+            pending_tool_results.clear()
+
+    for m in messages:
+        if m.role == "system":
+            continue
+        if m.role == "tool":
+            pending_tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": m.tool_call_id or "",
+                    "content": m.content,
+                }
+            )
+            continue
+        flush_tool_results()
+        out.append({"role": m.role, "content": m.content})
+    flush_tool_results()
+    return out

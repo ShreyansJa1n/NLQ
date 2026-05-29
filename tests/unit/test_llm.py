@@ -14,12 +14,25 @@ from nl_db.llm.registry import build_provider
 
 
 class FakeAnthropicClient:
+    """Fake anthropic client.
+
+    Default returns a single text block. Inject `next_response` to swap in a
+    pre-built SimpleNamespace (e.g. with a tool_use block) for a single call.
+    """
+
     def __init__(self) -> None:
         self.messages = self
         self.last_call: dict[str, Any] | None = None
+        self.calls: list[dict[str, Any]] = []
+        self.next_response: Any | None = None
 
     def create(self, **kwargs: Any) -> Any:
         self.last_call = kwargs
+        self.calls.append(kwargs)
+        if self.next_response is not None:
+            r = self.next_response
+            self.next_response = None
+            return r
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text="SELECT 1;")],
             usage=SimpleNamespace(input_tokens=12, output_tokens=4),
@@ -121,16 +134,105 @@ def test_supports_tools_capability_per_provider() -> None:
     assert OpenAICompatibleProvider.supports_tools is None
 
 
-def test_chat_with_tools_raises_until_wired_anthropic() -> None:
+def test_anthropic_passes_tools_in_wire_format() -> None:
     client = FakeAnthropicClient()
     p = AnthropicProvider(model="claude-sonnet-4-6", api_key="x", client=client)
-    dummy_tool = ToolDef(
+    tool = ToolDef(
         name="list_tables",
         description="list table names",
         input_schema={"type": "object", "properties": {}},
     )
-    with pytest.raises(ToolsNotSupportedError):
-        p.chat([Message(role="user", content="hi")], tools=(dummy_tool,))
+    p.chat([Message(role="user", content="hi")], tools=(tool,))
+    assert client.last_call is not None
+    assert client.last_call["tools"] == [
+        {
+            "name": "list_tables",
+            "description": "list table names",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+    ]
+
+
+def test_anthropic_parses_tool_use_blocks() -> None:
+    client = FakeAnthropicClient()
+    client.next_response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                id="tool_abc",
+                name="describe_table",
+                input={"table_name": "users"},
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=20, output_tokens=8),
+        stop_reason="tool_use",
+    )
+    p = AnthropicProvider(model="claude-sonnet-4-6", api_key="x", client=client)
+    tool = ToolDef(name="describe_table", description="", input_schema={})
+    result = p.chat([Message(role="user", content="hi")], tools=(tool,))
+
+    assert result.text == ""
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert call.id == "tool_abc"
+    assert call.name == "describe_table"
+    assert call.arguments == {"table_name": "users"}
+    assert result.stop_reason == "tool_use"
+
+
+def test_anthropic_handles_mixed_text_and_tool_use() -> None:
+    client = FakeAnthropicClient()
+    client.next_response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="Let me check the schema first."),
+            SimpleNamespace(
+                type="tool_use",
+                id="tool_xyz",
+                name="list_tables",
+                input={},
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=15, output_tokens=10),
+        stop_reason="tool_use",
+    )
+    p = AnthropicProvider(model="claude-sonnet-4-6", api_key="x", client=client)
+    tool = ToolDef(name="list_tables", description="", input_schema={})
+    result = p.chat([Message(role="user", content="hi")], tools=(tool,))
+    assert "Let me check" in result.text
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "list_tables"
+
+
+def test_anthropic_translates_tool_messages_to_tool_result_blocks() -> None:
+    """A loop-back: assistant requested a tool, we feed the result back as a
+    role='tool' Message. Anthropic expects this packaged as a user message
+    with a tool_result content block referencing the tool_use_id."""
+    client = FakeAnthropicClient()
+    p = AnthropicProvider(model="claude-sonnet-4-6", api_key="x", client=client)
+    p.chat(
+        [
+            Message(role="user", content="what tables are there?"),
+            Message(role="assistant", content=""),  # the tool_use message
+            Message(
+                role="tool",
+                content='{"tables": ["users", "orders"]}',
+                tool_call_id="tool_abc",
+                tool_name="list_tables",
+            ),
+        ]
+    )
+    assert client.last_call is not None
+    convo = client.last_call["messages"]
+    # The tool message becomes a user message with a tool_result content block.
+    tool_result_msg = convo[-1]
+    assert tool_result_msg["role"] == "user"
+    assert tool_result_msg["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "tool_abc",
+            "content": '{"tables": ["users", "orders"]}',
+        }
+    ]
 
 
 def test_chat_with_tools_raises_until_wired_openai() -> None:
