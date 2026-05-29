@@ -9,7 +9,7 @@ from nl_db.config import load_settings
 from nl_db.llm.anthropic_provider import AnthropicProvider
 from nl_db.llm.openai_compatible import OpenAICompatibleProvider
 from nl_db.llm.openai_provider import OpenAIProvider
-from nl_db.llm.provider import Message
+from nl_db.llm.provider import Message, ToolDef, ToolsNotSupportedError
 from nl_db.llm.registry import build_provider
 
 
@@ -110,3 +110,58 @@ def test_registry_builds_openai_compatible(monkeypatch: pytest.MonkeyPatch, tmp_
     assert provider.name == "openai_compatible"
     assert isinstance(provider, OpenAICompatibleProvider)
     assert provider.model == "local-llama"
+
+
+# Tool-calling capability declaration ----------------------------------------
+
+def test_supports_tools_capability_per_provider() -> None:
+    # Static metadata — no construction-time probes.
+    assert AnthropicProvider.supports_tools is True
+    assert OpenAIProvider.supports_tools is True
+    assert OpenAICompatibleProvider.supports_tools is None
+
+
+def test_chat_with_tools_raises_until_wired_anthropic() -> None:
+    client = FakeAnthropicClient()
+    p = AnthropicProvider(model="claude-sonnet-4-6", api_key="x", client=client)
+    dummy_tool = ToolDef(
+        name="list_tables",
+        description="list table names",
+        input_schema={"type": "object", "properties": {}},
+    )
+    with pytest.raises(ToolsNotSupportedError):
+        p.chat([Message(role="user", content="hi")], tools=(dummy_tool,))
+
+
+def test_chat_with_tools_raises_until_wired_openai() -> None:
+    client = FakeOpenAIClient()
+    p = OpenAIProvider(model="gpt-4o", api_key="x", client=client)
+    dummy_tool = ToolDef(
+        name="list_tables",
+        description="list table names",
+        input_schema={"type": "object", "properties": {}},
+    )
+    with pytest.raises(ToolsNotSupportedError):
+        p.chat([Message(role="user", content="hi")], tools=(dummy_tool,))
+
+
+def test_chat_without_tools_unaffected_anthropic() -> None:
+    # Same call as the existing test, just confirms the new tools= kwarg
+    # doesn't break the no-tools path.
+    client = FakeAnthropicClient()
+    p = AnthropicProvider(model="claude-sonnet-4-6", api_key="x", client=client)
+    result = p.chat([Message(role="user", content="hi")])
+    assert result.text == "SELECT 1;"
+    assert result.tool_calls == ()
+
+
+def test_message_with_tool_role_constructs() -> None:
+    m = Message(
+        role="tool",
+        content='{"tables": ["users", "posts"]}',
+        tool_call_id="call_abc",
+        tool_name="list_tables",
+    )
+    assert m.role == "tool"
+    assert m.tool_call_id == "call_abc"
+    assert m.tool_name == "list_tables"

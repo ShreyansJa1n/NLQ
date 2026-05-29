@@ -9,6 +9,8 @@ from .provider import ChatResult, Message
 
 class OpenAIProvider:
     name = "openai"
+    # All current GPT-4* / GPT-4o* / GPT-3.5-turbo support tool-calling.
+    supports_tools: bool | None = True
 
     def __init__(self, model: str, api_key: str, client: Any | None = None) -> None:
         self._model = model
@@ -24,7 +26,15 @@ class OpenAIProvider:
         *,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
+        tools: tuple[Any, ...] | None = None,
     ) -> ChatResult:
+        # Tools are wired through in the next commit (OpenAI tool-calling).
+        if tools:
+            from .provider import ToolsNotSupportedError
+
+            raise ToolsNotSupportedError(
+                "OpenAI tool-calling not yet wired in this provider."
+            )
         wire = cast(
             Any,
             [{"role": m.role, "content": m.content} for m in messages],

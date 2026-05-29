@@ -18,6 +18,12 @@ class OpenAICompatibleProvider:
     """
 
     name = "openai_compatible"
+    # Tool-calling support depends entirely on the shim + model. Ollama
+    # implements it for some models; Apple Intelligence shims typically
+    # don't. None means: the lazy-schema orchestrator should attempt tools
+    # and fall back to schema injection if the shim rejects them or the
+    # model ignores them.
+    supports_tools: bool | None = None
 
     def __init__(
         self,
@@ -42,7 +48,16 @@ class OpenAICompatibleProvider:
         *,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
+        tools: tuple[Any, ...] | None = None,
     ) -> ChatResult:
+        # Tools are wired through in the next commit; until then we surface
+        # ToolsNotSupportedError so the orchestrator can fall back cleanly.
+        if tools:
+            from .provider import ToolsNotSupportedError
+
+            raise ToolsNotSupportedError(
+                "OpenAI-compatible tool-calling not yet wired in this provider."
+            )
         wire = cast(
             Any,
             [{"role": m.role, "content": m.content} for m in messages],

@@ -9,6 +9,8 @@ from .provider import ChatResult, Message
 
 class AnthropicProvider:
     name = "anthropic"
+    # All current Claude 3.x and 4.x models support tool-calling.
+    supports_tools: bool | None = True
 
     def __init__(self, model: str, api_key: str, client: Any | None = None) -> None:
         self._model = model
@@ -24,7 +26,16 @@ class AnthropicProvider:
         *,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
+        tools: tuple[Any, ...] | None = None,
     ) -> ChatResult:
+        # Tools are wired through in the next commit (anthropic tool-calling).
+        # Until then, accepting the kwarg keeps the Protocol consistent.
+        if tools:
+            from .provider import ToolsNotSupportedError
+
+            raise ToolsNotSupportedError(
+                "Anthropic tool-calling not yet wired in this provider."
+            )
         system_parts = [m.content for m in messages if m.role == "system"]
         convo = [
             {"role": m.role, "content": m.content}
