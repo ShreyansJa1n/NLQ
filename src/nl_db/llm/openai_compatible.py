@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import openai
 
-from .provider import ChatResult, Message
+from ._openai_common import call_openai_chat
+from .provider import ChatResult, Message, ToolDef
 
 
 class OpenAICompatibleProvider:
@@ -48,35 +49,15 @@ class OpenAICompatibleProvider:
         *,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
-        tools: tuple[Any, ...] | None = None,
+        tools: tuple[ToolDef, ...] | None = None,
     ) -> ChatResult:
-        # Tools are wired through in the next commit; until then we surface
-        # ToolsNotSupportedError so the orchestrator can fall back cleanly.
-        if tools:
-            from .provider import ToolsNotSupportedError
-
-            raise ToolsNotSupportedError(
-                "OpenAI-compatible tool-calling not yet wired in this provider."
-            )
-        wire = cast(
-            Any,
-            [{"role": m.role, "content": m.content} for m in messages],
-        )
-        response = self._client.chat.completions.create(
+        # call_openai_chat translates shim rejections of tools= into
+        # ToolsNotSupportedError for the orchestrator to catch.
+        return call_openai_chat(
+            self._client,
             model=self._model,
-            messages=wire,
+            messages=messages,
             temperature=temperature,
-            max_tokens=max_output_tokens,
-        )
-        choice = response.choices[0]
-        text = choice.message.content or ""
-        usage = getattr(response, "usage", None)
-        return ChatResult(
-            text=text,
-            input_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
-            output_tokens=getattr(usage, "completion_tokens", None) if usage else None,
-            provider_meta={
-                "model": self._model,
-                "finish_reason": getattr(choice, "finish_reason", None),
-            },
+            max_output_tokens=max_output_tokens,
+            tools=tools,
         )

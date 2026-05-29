@@ -41,17 +41,36 @@ class FakeAnthropicClient:
 
 
 class FakeOpenAIClient:
+    """Fake openai SDK client.
+
+    Default returns a single text message. Inject `next_response` to swap
+    in a pre-built SimpleNamespace (e.g. with tool_calls) for one call, or
+    `next_error` to raise an exception on the next call.
+    """
+
     def __init__(self) -> None:
         self.chat = self
         self.completions = self
         self.last_call: dict[str, Any] | None = None
+        self.calls: list[dict[str, Any]] = []
+        self.next_response: Any | None = None
+        self.next_error: Exception | None = None
 
     def create(self, **kwargs: Any) -> Any:
         self.last_call = kwargs
+        self.calls.append(kwargs)
+        if self.next_error is not None:
+            err = self.next_error
+            self.next_error = None
+            raise err
+        if self.next_response is not None:
+            r = self.next_response
+            self.next_response = None
+            return r
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
-                    message=SimpleNamespace(content="SELECT 2;"),
+                    message=SimpleNamespace(content="SELECT 2;", tool_calls=None),
                     finish_reason="stop",
                 )
             ],
@@ -235,16 +254,143 @@ def test_anthropic_translates_tool_messages_to_tool_result_blocks() -> None:
     ]
 
 
-def test_chat_with_tools_raises_until_wired_openai() -> None:
+def test_openai_passes_tools_in_function_wire_format() -> None:
     client = FakeOpenAIClient()
     p = OpenAIProvider(model="gpt-4o", api_key="x", client=client)
-    dummy_tool = ToolDef(
+    tool = ToolDef(
         name="list_tables",
         description="list table names",
         input_schema={"type": "object", "properties": {}},
     )
-    with pytest.raises(ToolsNotSupportedError):
-        p.chat([Message(role="user", content="hi")], tools=(dummy_tool,))
+    p.chat([Message(role="user", content="hi")], tools=(tool,))
+    assert client.last_call is not None
+    assert client.last_call["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_tables",
+                "description": "list table names",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+
+def test_openai_parses_tool_calls_with_json_args() -> None:
+    client = FakeOpenAIClient()
+    client.next_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_abc",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="describe_table",
+                                arguments='{"table_name": "users"}',
+                            ),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=15, completion_tokens=8),
+    )
+    p = OpenAIProvider(model="gpt-4o", api_key="x", client=client)
+    tool = ToolDef(name="describe_table", description="", input_schema={})
+    result = p.chat([Message(role="user", content="hi")], tools=(tool,))
+
+    assert result.text == ""
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert call.id == "call_abc"
+    assert call.name == "describe_table"
+    assert call.arguments == {"table_name": "users"}
+    assert result.stop_reason == "tool_calls"
+
+
+def test_openai_role_tool_messages_loop_back() -> None:
+    client = FakeOpenAIClient()
+    p = OpenAIProvider(model="gpt-4o", api_key="x", client=client)
+    p.chat(
+        [
+            Message(role="user", content="what tables?"),
+            Message(role="assistant", content=""),
+            Message(
+                role="tool",
+                content='{"tables": ["users"]}',
+                tool_call_id="call_abc",
+                tool_name="list_tables",
+            ),
+        ]
+    )
+    assert client.last_call is not None
+    msgs = client.last_call["messages"]
+    tool_msg = msgs[-1]
+    assert tool_msg == {
+        "role": "tool",
+        "tool_call_id": "call_abc",
+        "content": '{"tables": ["users"]}',
+    }
+
+
+def test_openai_compatible_passes_tools_through() -> None:
+    client = FakeOpenAIClient()
+    p = OpenAICompatibleProvider(
+        model="local-llama",
+        base_url="http://localhost:8080/v1",
+        client=client,
+    )
+    tool = ToolDef(name="list_tables", description="", input_schema={})
+    p.chat([Message(role="user", content="hi")], tools=(tool,))
+    assert client.last_call is not None
+    assert "tools" in client.last_call
+
+
+def test_openai_compatible_falls_back_to_tools_not_supported_on_400() -> None:
+    """When a shim returns 400 mentioning tools, we want the orchestrator
+    to see ToolsNotSupportedError so it can fall back to schema injection."""
+
+    class FakeBadRequestError(Exception):
+        pass
+
+    # Pretend it's an openai BadRequestError (name-based match in the helper).
+    FakeBadRequestError.__name__ = "BadRequestError"
+
+    client = FakeOpenAIClient()
+    client.next_error = FakeBadRequestError(
+        "400 unknown parameter: 'tools' is not supported by this model"
+    )
+    p = OpenAICompatibleProvider(
+        model="apple.local",
+        base_url="http://localhost:8080/v1",
+        client=client,
+    )
+    tool = ToolDef(name="list_tables", description="", input_schema={})
+    with pytest.raises(ToolsNotSupportedError, match="rejected tools"):
+        p.chat([Message(role="user", content="hi")], tools=(tool,))
+
+
+def test_openai_compatible_propagates_non_tools_errors() -> None:
+    """When tools= wasn't requested, errors should propagate as-is."""
+
+    class FakeBadRequestError(Exception):
+        pass
+
+    FakeBadRequestError.__name__ = "BadRequestError"
+
+    client = FakeOpenAIClient()
+    client.next_error = FakeBadRequestError("400 invalid model")
+    p = OpenAICompatibleProvider(
+        model="apple.local",
+        base_url="http://localhost:8080/v1",
+        client=client,
+    )
+    with pytest.raises(FakeBadRequestError):
+        p.chat([Message(role="user", content="hi")])
 
 
 def test_chat_without_tools_unaffected_anthropic() -> None:
