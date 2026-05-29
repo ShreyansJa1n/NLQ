@@ -151,8 +151,10 @@ def _looks_like_tools_unsupported(exc: Exception) -> bool:
     msg = str(exc).lower()
     # The most common cases: BadRequestError with a mention of 'tool'/'function',
     # or APIStatusError variants saying the same.
-    if name in ("BadRequestError", "UnprocessableEntityError", "APIStatusError") and any(
+    return name in (
+        "BadRequestError",
+        "UnprocessableEntityError",
+        "APIStatusError",
+    ) and any(
         kw in msg for kw in ("tool", "function", "unsupported", "unknown parameter")
-    ):
-        return True
-    return False
+    )
