@@ -53,6 +53,8 @@ class GenerationConfig(BaseModel):
     paraphrase_max_output_tokens: int = Field(default=512, ge=32, le=2048)
     auto_limit: bool = True
     num_few_shot: int = Field(default=-1, ge=-1, le=20)  # -1 = use builder default
+    lazy_schema: bool = False  # tool-calling path; falls back to injection on failure
+    lazy_max_iterations: int = Field(default=8, ge=2, le=20)
 
 
 class _TomlSource(PydanticBaseSettingsSource):

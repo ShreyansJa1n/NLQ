@@ -49,6 +49,8 @@ def _build_pipeline(
         paraphrase_max_output_tokens=gen.paraphrase_max_output_tokens,
         auto_limit=gen.auto_limit,
         num_few_shot=None if gen.num_few_shot == -1 else gen.num_few_shot,
+        lazy_schema=gen.lazy_schema,
+        lazy_max_iterations=gen.lazy_max_iterations,
     )
     return pipe, provider.name
 

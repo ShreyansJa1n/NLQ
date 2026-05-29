@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from .agent import AgentRun, LazyAgentError, run_lazy_schema
 from .conversation import Conversation
 from .executor import QueryExecutor, QueryResult, SQLiteExecutor
 from .generator import (
@@ -13,7 +15,7 @@ from .generator import (
     GenerationOutcome,
     generate_outcome,
 )
-from .llm.provider import LLMProvider
+from .llm.provider import LLMProvider, ToolsNotSupportedError
 from .prompts.builder import BuiltPrompt, build_sql_prompt, exceeds_budget
 from .prompts.examples import FewShotExample, few_shot_for
 from .prompts.paraphrase import paraphrase_sql
@@ -31,11 +33,16 @@ class PipelineOutput:
     "When outcome is Answer" are populated only for the Answer branch. The
     `state` property gives a stable string for callers that don't want to
     isinstance-check.
+
+    For lazy-schema runs, `agent_run` captures the tool-use trace (so the
+    Debug expander can show what the model looked up) and `prompt` is None
+    (the lazy path doesn't build a single up-front prompt the way schema
+    injection does).
     """
 
     question: str
     outcome: GenerationOutcome
-    prompt: BuiltPrompt
+    prompt: BuiltPrompt | None = None
 
     # When outcome is Answer:
     sql_raw: str | None = None
@@ -47,6 +54,13 @@ class PipelineOutput:
     is_destructive: bool = False
     confirmed: bool = False
     skipped_reason: str | None = None
+
+    # Lazy-schema metadata. Populated when lazy mode was attempted, regardless
+    # of whether it succeeded (so the Debug expander can show "fell back
+    # because X" too).
+    agent_run: AgentRun | None = None
+    lazy_attempted: bool = False
+    lazy_fallback_reason: str | None = None
 
     @property
     def state(self) -> str:
@@ -99,6 +113,8 @@ class Pipeline:
         paraphrase_max_output_tokens: int = 512,
         auto_limit: bool = True,
         num_few_shot: int | None = None,
+        lazy_schema: bool = False,
+        lazy_max_iterations: int = 8,
     ) -> None:
         self._provider = provider
         self._db_path = db_path
@@ -115,6 +131,8 @@ class Pipeline:
         self._paraphrase_max_output_tokens = paraphrase_max_output_tokens
         self._auto_limit = auto_limit
         self._num_few_shot = num_few_shot
+        self._lazy_schema = lazy_schema
+        self._lazy_max_iterations = lazy_max_iterations
 
     def schema(self) -> Schema:
         return self._cache.get(
@@ -137,24 +155,61 @@ class Pipeline:
         history: Conversation | None = None,
     ) -> PipelineOutput:
         schema = self.schema()
-        prompt = build_sql_prompt(
-            schema,
-            question,
-            examples=self._select_examples(schema),
-            history=history,
-        )
-        if exceeds_budget(prompt, self._max_prompt_tokens):
-            # Soft warning only — the LLM may still handle it. The caller can
-            # inspect prompt.approx_tokens against max_prompt_tokens if it
-            # wants to surface this to the user.
-            pass
 
-        outcome = generate_outcome(
-            self._provider,
-            prompt,
-            temperature=self._temperature,
-            max_output_tokens=self._max_output_tokens,
-        )
+        # Lazy-schema path: model fetches schema via tools rather than having
+        # it injected. Falls back to schema injection on any failure (provider
+        # rejects tools, model loops, empty response, etc.) so the user
+        # always gets an answer.
+        agent_run: AgentRun | None = None
+        lazy_fallback_reason: str | None = None
+        outcome: GenerationOutcome | None = None
+        prompt: BuiltPrompt | None = None
+
+        if self._lazy_schema:
+            try:
+                agent_run = run_lazy_schema(
+                    provider=self._provider,
+                    schema=schema,
+                    question=question,
+                    temperature=self._temperature,
+                    max_output_tokens=self._max_output_tokens,
+                    max_iterations=self._lazy_max_iterations,
+                )
+                outcome = agent_run.outcome
+            except ToolsNotSupportedError as e:
+                lazy_fallback_reason = (
+                    f"provider doesn't support tool-calling — fell back to "
+                    f"schema injection ({e})"
+                )
+            except LazyAgentError as e:
+                lazy_fallback_reason = (
+                    f"agent loop failed — fell back to schema injection ({e})"
+                )
+
+        if outcome is None:
+            # Either lazy was off, or it was on and we fell back.
+            prompt = build_sql_prompt(
+                schema,
+                question,
+                examples=self._select_examples(schema),
+                history=history,
+            )
+            if exceeds_budget(prompt, self._max_prompt_tokens):
+                # Soft warning only — caller can inspect prompt.approx_tokens.
+                pass
+            outcome = generate_outcome(
+                self._provider,
+                prompt,
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+            )
+
+        # Build the lazy-schema metadata bundle that every return path shares.
+        lazy_meta: dict[str, Any] = {
+            "agent_run": agent_run,
+            "lazy_attempted": self._lazy_schema,
+            "lazy_fallback_reason": lazy_fallback_reason,
+        }
 
         # CannotAnswer + Clarify short-circuit. For CannotAnswer we inject
         # available_tables from the live schema so callers don't have to
@@ -164,10 +219,14 @@ class Pipeline:
                 reason=outcome.reason,
                 available_tables=schema.table_names(),
             )
-            return PipelineOutput(question=question, outcome=outcome, prompt=prompt)
+            return PipelineOutput(
+                question=question, outcome=outcome, prompt=prompt, **lazy_meta
+            )
 
         if isinstance(outcome, Clarify):
-            return PipelineOutput(question=question, outcome=outcome, prompt=prompt)
+            return PipelineOutput(
+                question=question, outcome=outcome, prompt=prompt, **lazy_meta
+            )
 
         # Answer branch — validate, paraphrase, confirm, execute.
         validation = validate_sql(
@@ -209,4 +268,5 @@ class Pipeline:
             is_destructive=validation.is_destructive,
             confirmed=confirmed,
             skipped_reason=skipped_reason,
+            **lazy_meta,
         )

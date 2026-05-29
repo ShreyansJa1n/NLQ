@@ -40,7 +40,14 @@ def log_pipeline_run(output: PipelineOutput, log_dir: Path, provider_name: str) 
         "auto_limit_applied": output.auto_limit_applied,
         "is_destructive": output.is_destructive,
         "confirmed": output.confirmed,
-        "approx_prompt_tokens": output.prompt.approx_tokens,
+        "approx_prompt_tokens": (
+            output.prompt.approx_tokens if output.prompt is not None else None
+        ),
+        "lazy_attempted": output.lazy_attempted,
+        "lazy_iterations": (
+            output.agent_run.iterations if output.agent_run is not None else None
+        ),
+        "lazy_fallback_reason": output.lazy_fallback_reason,
         "row_count": output.result.row_count if output.result else None,
         "truncated": output.result.truncated if output.result else None,
         "pid": os.getpid(),

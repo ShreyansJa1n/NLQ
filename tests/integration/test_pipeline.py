@@ -262,3 +262,160 @@ def test_pipeline_no_history_no_conversation_block(sample_db: Path) -> None:
     Pipeline(provider=provider, db_path=sample_db).run("list ids")
     user_prompt = provider.calls[0][1].content
     assert "Conversation so far:" not in user_prompt
+
+
+# Lazy-schema integration tests ---------------------------------------------
+
+class ToolCapableProvider:
+    """Fake provider that supports tools and serves a scripted sequence of
+    ChatResults regardless of whether tools= is passed. Lets us drive the
+    lazy-schema path through Pipeline end-to-end without mocking the agent."""
+
+    name = "tool-capable"
+    model = "tc-1"
+    supports_tools: bool | None = True
+
+    def __init__(self, *results) -> None:  # type: ignore[no-untyped-def]
+        self._queue = list(results)
+        self.calls: list[dict] = []  # type: ignore[type-arg]
+
+    def chat(
+        self,
+        messages,  # type: ignore[no-untyped-def]
+        *,
+        temperature: float = 0.0,
+        max_output_tokens: int = 1024,
+        tools=None,  # type: ignore[no-untyped-def]
+    ):  # type: ignore[no-untyped-def]
+        self.calls.append({"tools": tools, "messages": list(messages)})
+        if not self._queue:
+            raise AssertionError("ToolCapableProvider exhausted")
+        return self._queue.pop(0)
+
+
+def test_pipeline_lazy_schema_runs_through_agent(sample_db: Path) -> None:
+    from nl_db.agent import LAZY_TOOLS
+    from nl_db.llm.provider import ChatResult, ToolCall
+
+    provider = ToolCapableProvider(
+        # Iteration 1: model calls list_tables
+        ChatResult(
+            text="",
+            tool_calls=(ToolCall(id="c1", name="list_tables", arguments={}),),
+        ),
+        # Iteration 2: model emits final SQL
+        ChatResult(text="```sql\nSELECT name FROM users ORDER BY id\n```"),
+        # The paraphrase pass (lazy mode still paraphrases the SQL)
+        ChatResult(text="Returns every user's name."),
+    )
+    out = Pipeline(provider=provider, db_path=sample_db, lazy_schema=True).run(
+        "list every user's name"
+    )
+
+    assert out.state == "ANSWER"
+    assert out.lazy_attempted is True
+    assert out.lazy_fallback_reason is None
+    assert out.agent_run is not None
+    assert out.agent_run.iterations == 2
+    assert [i.name for i in out.agent_run.invocations] == ["list_tables"]
+    # The agent used the lazy tools, never a schema block.
+    agent_calls = [c for c in provider.calls if c["tools"] is not None]
+    assert all(c["tools"] == LAZY_TOOLS for c in agent_calls)
+    # Result populated normally through the Answer branch.
+    assert out.result is not None
+    assert out.result.columns == ("name",)
+
+
+def test_pipeline_lazy_schema_falls_back_when_tools_unsupported(
+    sample_db: Path,
+) -> None:
+    """When the provider raises ToolsNotSupportedError, Pipeline should
+    fall back to schema injection and still produce an Answer."""
+    from nl_db.llm.provider import ChatResult, ToolsNotSupportedError
+
+    class FallbackProvider:
+        name = "fallback"
+        model = "x"
+        supports_tools = None  # unknown — orchestrator will try
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []  # type: ignore[type-arg]
+
+        def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            tools = kwargs.get("tools")
+            self.calls.append({"tools": tools})
+            if tools:
+                # Pretend the shim rejected tools.
+                raise ToolsNotSupportedError("shim doesn't support tools")
+            # Fallback path: SQL gen, then paraphrase.
+            if len(self.calls) == 2:
+                return ChatResult(text="```sql\nSELECT name FROM users\n```")
+            return ChatResult(text="Returns every user's name.")
+
+    provider = FallbackProvider()
+    out = Pipeline(
+        provider=provider,  # type: ignore[arg-type]
+        db_path=sample_db,
+        lazy_schema=True,
+    ).run("list every user's name")
+
+    assert out.state == "ANSWER"
+    assert out.lazy_attempted is True
+    assert out.lazy_fallback_reason is not None
+    assert "doesn't support tool-calling" in out.lazy_fallback_reason
+    assert out.agent_run is None
+    # First call had tools (the failed attempt), second + third didn't.
+    assert provider.calls[0]["tools"] is not None
+    assert provider.calls[1]["tools"] is None
+    assert out.sql_final is not None
+
+
+def test_pipeline_lazy_schema_off_skips_agent_path(sample_db: Path) -> None:
+    """When lazy_schema is False (default), the agent path is never invoked."""
+    provider = CannedProvider(
+        "```sql\nSELECT id FROM users\n```",
+        "Lists ids.",
+    )
+    out = Pipeline(provider=provider, db_path=sample_db).run("ids")
+    assert out.state == "ANSWER"
+    assert out.lazy_attempted is False
+    assert out.agent_run is None
+    assert out.lazy_fallback_reason is None
+
+
+def test_pipeline_lazy_schema_falls_back_on_empty_response(
+    sample_db: Path,
+) -> None:
+    """Reasoning-model case: model emits no tool calls and no text. The
+    agent raises LazyAgentError, Pipeline falls back to injection."""
+    from nl_db.llm.provider import ChatResult
+
+    class EmptyThenAnswerProvider:
+        name = "empty-then-answer"
+        model = "x"
+        supports_tools = True
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            self.n += 1
+            tools = kwargs.get("tools")
+            if tools:
+                # Lazy attempt — pretend the model exhausted its budget.
+                return ChatResult(text="", tool_calls=())
+            # Fallback path: SQL gen, then paraphrase.
+            if self.n == 2:
+                return ChatResult(text="```sql\nSELECT 1\n```")
+            return ChatResult(text="Trivial.")
+
+    out = Pipeline(
+        provider=EmptyThenAnswerProvider(),  # type: ignore[arg-type]
+        db_path=sample_db,
+        lazy_schema=True,
+    ).run("?")
+
+    assert out.state == "ANSWER"
+    assert out.lazy_attempted is True
+    assert out.lazy_fallback_reason is not None
+    assert "agent loop failed" in out.lazy_fallback_reason
