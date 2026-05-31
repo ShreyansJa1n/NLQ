@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv sync                                          # install deps (+ dev group)
-uv run pytest                                    # full suite (132 tests, ~1s)
+uv run pytest                                    # full suite (164 tests, ~1s)
 uv run pytest tests/unit/test_schema.py          # one file
 uv run pytest -k "auto_limit"                    # by test name pattern
 uv run pytest tests/integration/test_mcp_server.py::test_query_database_end_to_end  # one test
@@ -31,7 +31,7 @@ uv run nl-db-ui                                                    # Streamlit p
 
 2. **`SchemaExtractor` Protocol (`src/nl_db/schema/base.py`).** SQLite is the only implementation in v1. `schema/cache.py` caches results keyed by `(path, mtime)` so repeated CLI/MCP calls don't re-introspect the DB. `render_for_prompt()` turns a `Schema` into the compact form injected into LLM prompts — token efficiency is intentional, don't expand it without measuring.
 
-3. **`Pipeline` (`src/nl_db/pipeline.py`).** Orchestrates: `schema()` → `build_sql_prompt` → `generate_outcome` → branch on outcome. The `generate_outcome` call returns a three-state `GenerationOutcome` (`Answer(sql)` | `CannotAnswer(reason, available_tables)` | `Clarify(question)`) defined in `src/nl_db/generator.py`. Only the `Answer` branch runs `validate_sql` → optional `paraphrase_sql` → confirm callback → execute. `CannotAnswer` and `Clarify` short-circuit; the Pipeline injects `available_tables` from the live schema on `CannotAnswer`. `PipelineOutput.state` returns the stable string `"ANSWER" | "CANNOT_ANSWER" | "CLARIFY"` for callers that don't want to `isinstance`-check. The `ConfirmFn` callback (Answer branch only) is the seam between UX surfaces: the CLI plugs an interactive `rich.Confirm`, the MCP server returns SQL to the host model (auto-confirms), `--no-confirm` skips. Tuning knobs (`temperature`, `max_output_tokens`, `paraphrase_temperature`, `paraphrase_max_output_tokens`, `auto_limit`, `num_few_shot`) are constructor kwargs sourced from the `GenerationConfig` block in `Settings`.
+3. **`Pipeline` (`src/nl_db/pipeline.py`).** Orchestrates: `schema()` → `build_sql_prompt` → `generate_outcome` → branch on outcome. The `generate_outcome` call returns a three-state `GenerationOutcome` (`Answer(sql)` | `CannotAnswer(reason, available_tables)` | `Clarify(question)`) defined in `src/nl_db/generator.py`. Only the `Answer` branch runs `validate_sql` → optional `paraphrase_sql` → confirm callback → execute. `CannotAnswer` and `Clarify` short-circuit; the Pipeline injects `available_tables` from the live schema on `CannotAnswer`. `PipelineOutput.state` returns the stable string `"ANSWER" | "CANNOT_ANSWER" | "CLARIFY"` for callers that don't want to `isinstance`-check. The `ConfirmFn` callback (Answer branch only) is the seam between UX surfaces: the CLI plugs an interactive `rich.Confirm`, the MCP server returns SQL to the host model (auto-confirms), `--no-confirm` skips. Tuning knobs (`temperature`, `max_output_tokens`, `paraphrase_temperature`, `paraphrase_max_output_tokens`, `auto_limit`, `num_few_shot`, `lazy_schema`, `lazy_max_iterations`) are constructor kwargs sourced from the `GenerationConfig` block in `Settings`. When `lazy_schema=True`, the Pipeline routes through `src/nl_db/agent.py::run_lazy_schema()` instead — the LLM gets `list_tables()` and `describe_table(name)` tools and the schema is NEVER injected. Any failure (provider raises `ToolsNotSupportedError`, agent loops past max_iterations, model returns empty text) falls back to schema injection with `PipelineOutput.lazy_fallback_reason` recording why.
 
 ### Invariants (do not break)
 
@@ -40,7 +40,7 @@ uv run nl-db-ui                                                    # Streamlit p
 - **NL-friendly errors.** Raw exceptions (`sqlglot.ParseError`, `sqlite3.OperationalError`, `SQLValidationError`, vendor SDK errors) are translated by `nl_db.nl_errors.humanize()` before reaching any user-facing surface. The pipeline still raises raw exceptions internally — only CLI / UI / MCP wrappers humanize.
 - **SQL transparency.** Generated SQL is surfaced (to the user via CLI, to the host LLM via MCP tool response) before any side effect. The paraphrase step (`prompts/paraphrase.py`) gives a one-sentence NL explanation as a second mitigation — schema is deliberately NOT re-sent in the paraphrase prompt.
 - **Read-only by default.** `validator.validate_sql` uses sqlglot's parse tree (not regex) to detect `INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE` and refuses unless `allow_writes=True`. Auto-LIMIT is injected for unbounded SELECTs (skipped for destructive statements).
-- **Provider-agnostic by construction.** No file outside `llm/` may know which LLM is in use. The provider name is *configuration*, not code.
+- **Provider-agnostic by construction.** No file outside `llm/` may know which LLM is in use. The provider name is *configuration*, not code. `LLMProvider.supports_tools` is three-state (`True | False | None`) — Anthropic and OpenAI are `True`, openai-compatible is `None` (unknown — the agent attempts and falls back on `ToolsNotSupportedError`).
 - **Eval-driven.** `eval/dataset.yaml` is the NL→SQL test set against `tests/fixtures/sample.db`. 35 cases total: 30 `ANSWER` cases (row/SQL-pattern scored) + 3 `CANNOT_ANSWER` + 2 `CLARIFY` cases (state-scored). Cases declare `expected_state` (defaults to `ANSWER`). Any prompt change in `src/nl_db/prompts/` or system-prompt change should be re-evaluated via `python -m eval.runner` before merging.
 
 ### MCP server
@@ -58,6 +58,12 @@ Env vars > `.env` > `./nl-db.toml` (project-local, `NL_DB_CONFIG_FILE` override)
 ### Apple Intelligence path
 
 Not built in this repo. nl-db consumes Apple Intelligence through *any* third-party Swift HTTP shim that exposes Apple's `FoundationModels` framework via the OpenAI `/v1/chat/completions` wire format. Point `NL_DB_PROVIDER__BASE_URL` at the shim — nl-db treats it as just another `openai_compatible` provider. No special code path.
+
+### Lazy-schema agent
+
+`src/nl_db/agent.py::run_lazy_schema(provider, schema, question, ...)` runs a tool-use loop with two tools — `list_tables()` and `describe_table(table_name)` — instead of injecting the schema into the prompt. Returns an `AgentRun(outcome, invocations, iterations)` whose `outcome` is the same three-state `GenerationOutcome` the injection path produces. Schema is the source of truth for tool answers (no DB queries during the loop). Failure modes — `ToolsNotSupportedError`, `LazyAgentError` (loop ran past `max_iterations`, or model returned empty text + no tool calls) — are caught by the Pipeline and trigger fallback to schema injection with a recorded `lazy_fallback_reason`.
+
+Anthropic and OpenAI use different wire formats for tool-calling; the translation lives in `anthropic_provider.py::_build_anthropic_messages` (Anthropic packages role='tool' Messages into `tool_result` content blocks within a user message) and `_openai_common.py::build_openai_messages` (OpenAI accepts role='tool' Messages directly). The agent emits provider-agnostic `Message(role='tool', tool_call_id=..., content=...)` and each provider translates.
 
 ### Streamlit playground
 

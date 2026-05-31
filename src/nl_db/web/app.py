@@ -298,6 +298,8 @@ def _init_state() -> None:
     st.session_state.paraphrase_max_output_tokens = g.paraphrase_max_output_tokens
     st.session_state.auto_limit = g.auto_limit
     st.session_state.num_few_shot = g.num_few_shot
+    st.session_state.lazy_schema = g.lazy_schema
+    st.session_state.lazy_max_iterations = g.lazy_max_iterations
     st.session_state.allow_writes = False
     st.session_state.history: list[HistoryEntry] = []
     st.session_state.last_output: PipelineOutput | None = None
@@ -330,6 +332,8 @@ def _snapshot_settings_from_state() -> Settings:
         paraphrase_max_output_tokens=int(st.session_state.paraphrase_max_output_tokens),
         auto_limit=bool(st.session_state.auto_limit),
         num_few_shot=int(st.session_state.num_few_shot),
+        lazy_schema=bool(st.session_state.lazy_schema),
+        lazy_max_iterations=int(st.session_state.lazy_max_iterations),
     )
     snapshot = Settings.model_construct(
         provider=provider,
@@ -410,8 +414,48 @@ def _build_pipeline() -> tuple[Pipeline, list[dict[str, Any]]]:
         paraphrase_max_output_tokens=int(st.session_state.paraphrase_max_output_tokens),
         auto_limit=bool(st.session_state.auto_limit),
         num_few_shot=n_few_shot,
+        lazy_schema=bool(st.session_state.lazy_schema),
+        lazy_max_iterations=int(st.session_state.lazy_max_iterations),
     )
     return pipeline, captures
+
+
+def _provider_supports_tools_static(provider_name: str) -> bool | None:
+    """Static capability per provider — mirrors the provider classes.
+
+    Kept here (vs. instantiating the provider) so the sidebar can decide
+    whether to enable the Lazy-schema toggle without needing valid API
+    credentials. If the user changes provider, the toggle's state updates
+    on the next rerun.
+    """
+    if provider_name in ("anthropic", "openai"):
+        return True
+    if provider_name == "openai_compatible":
+        return None
+    return None  # unknown future provider
+
+
+def _lazy_schema_help_text(supports_tools: bool | None) -> str:
+    """Context-sensitive tooltip for the Lazy-schema toggle."""
+    base = (
+        "When on, nl-db gives the LLM tools (list_tables, describe_table) "
+        "to look up the schema on demand instead of injecting it into every "
+        "prompt. Saves tokens on large schemas."
+    )
+    if supports_tools is True:
+        return base + "\n\n**Your provider supports tool-calling natively.**"
+    if supports_tools is False:
+        return base + (
+            "\n\n**Your current provider doesn't support tool-calling.** "
+            "This toggle is disabled."
+        )
+    return base + (
+        "\n\n**Tool-calling support is untested for this provider.** "
+        "nl-db will attempt the lazy path and fall back to schema injection "
+        "if the shim rejects tools or the model ignores them. Falling back "
+        "adds the full schema to each prompt (~300 tokens for a small DB, "
+        "more for larger schemas)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +561,32 @@ with st.sidebar:
             min_value=-1,
             max_value=10,
             key="num_few_shot",
+        )
+
+        # Lazy-schema (tool-calling) toggle, with capability hint from the
+        # configured provider class.
+        _provider_name = st.session_state.provider_name
+        _provider_supports_tools = _provider_supports_tools_static(_provider_name)
+        _lazy_disabled = _provider_supports_tools is False
+        _lazy_help = _lazy_schema_help_text(_provider_supports_tools)
+        st.checkbox(
+            "Lazy schema (tool-calling)",
+            key="lazy_schema",
+            disabled=_lazy_disabled,
+            help=_lazy_help,
+        )
+        st.number_input(
+            "Max lazy-loop iterations",
+            min_value=2,
+            max_value=20,
+            step=1,
+            key="lazy_max_iterations",
+            disabled=_lazy_disabled or not st.session_state.lazy_schema,
+            help=(
+                "Hard cap on tool-use round-trips. The agent gives up and "
+                "falls back to schema injection if it hasn't produced a final "
+                "answer by this many iterations."
+            ),
         )
 
     with st.expander("Execution", expanded=False):
@@ -695,7 +765,19 @@ with tab_query:
                             "paraphrase": pout.paraphrase,
                             "is_destructive": pout.is_destructive,
                             "auto_limit_applied": pout.auto_limit_applied,
-                            "approx_prompt_tokens": pout.prompt.approx_tokens,
+                            "approx_prompt_tokens": (
+                                pout.prompt.approx_tokens
+                                if pout.prompt is not None
+                                else 0
+                            ),
+                            "lazy_attempted": pout.lazy_attempted,
+                            "lazy_iterations": (
+                                pout.agent_run.iterations
+                                if pout.agent_run is not None
+                                else None
+                            ),
+                            "lazy_fallback_reason": pout.lazy_fallback_reason,
+                            "agent_run": pout.agent_run,
                             "columns": list(pout.result.columns),
                             "rows": [list(r) for r in pout.result.rows],
                             "row_count": pout.result.row_count,
@@ -718,14 +800,38 @@ with tab_query:
                             "question": question,
                             "reason": pout.outcome.reason,
                             "available_tables": list(pout.outcome.available_tables),
-                            "approx_prompt_tokens": pout.prompt.approx_tokens,
+                            "approx_prompt_tokens": (
+                                pout.prompt.approx_tokens
+                                if pout.prompt is not None
+                                else 0
+                            ),
+                            "lazy_attempted": pout.lazy_attempted,
+                            "lazy_iterations": (
+                                pout.agent_run.iterations
+                                if pout.agent_run is not None
+                                else None
+                            ),
+                            "lazy_fallback_reason": pout.lazy_fallback_reason,
+                            "agent_run": pout.agent_run,
                         }
                     elif isinstance(pout.outcome, Clarify):
                         st.session_state.last_output = {
                             "kind": "clarify",
                             "question": question,
                             "clarify_question": pout.outcome.question,
-                            "approx_prompt_tokens": pout.prompt.approx_tokens,
+                            "approx_prompt_tokens": (
+                                pout.prompt.approx_tokens
+                                if pout.prompt is not None
+                                else 0
+                            ),
+                            "lazy_attempted": pout.lazy_attempted,
+                            "lazy_iterations": (
+                                pout.agent_run.iterations
+                                if pout.agent_run is not None
+                                else None
+                            ),
+                            "lazy_fallback_reason": pout.lazy_fallback_reason,
+                            "agent_run": pout.agent_run,
                         }
                 except SQLValidationError as e:
                     st.error(_explain_llm_error(e), icon="🛑")
@@ -776,6 +882,34 @@ with tab_query:
                 if out["paraphrase"]:
                     st.success(out["paraphrase"], icon="🗣️")
                 st.code(out["sql_final"], language="sql")
+
+                # Lazy-schema status: tell the user whether tool-calling
+                # actually happened, fell back, or wasn't attempted.
+                if out.get("lazy_attempted"):
+                    if out.get("lazy_fallback_reason"):
+                        st.warning(
+                            f"Lazy schema attempted but fell back: "
+                            f"{out['lazy_fallback_reason']}",
+                            icon="🔁",
+                        )
+                    else:
+                        st.info(
+                            f"Lazy schema: {out.get('lazy_iterations', '?')} "
+                            f"tool round-trip(s). Full schema was NOT injected.",
+                            icon="🧭",
+                        )
+                    agent_run = out.get("agent_run")
+                    if agent_run is not None and agent_run.invocations:
+                        trace_lines = []
+                        for inv in agent_run.invocations:
+                            args = (
+                                ", ".join(f"{k}={v!r}" for k, v in inv.arguments.items())
+                                if inv.arguments
+                                else ""
+                            )
+                            trace_lines.append(f"  • {inv.name}({args})")
+                        st.code("\n".join(trace_lines), language="text")
+
                 st.caption(
                     f"~{out['approx_prompt_tokens']} prompt tokens · "
                     f"{'destructive' if out['is_destructive'] else 'read-only'}"

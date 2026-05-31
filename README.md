@@ -203,6 +203,8 @@ paraphrase_temperature = 0.0
 paraphrase_max_output_tokens = 512
 auto_limit = true
 num_few_shot = -1                   # -1 = all curated examples; 0 = none
+lazy_schema = false                 # true = use tool-calling; falls back on failure
+lazy_max_iterations = 8
 ```
 
 The Streamlit UI's sidebar **💾 Save to disk** button writes this file for you. API keys are never written — they always come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY` (env or `.env`).
@@ -251,6 +253,7 @@ uv run python -m eval.runner --limit 5
 - [x] Three-state generator output (`ANSWER` / `CANNOT_ANSWER` / `CLARIFY`)
 - [x] NL-first MCP surface (`describe_database`, top-level `db://schema` resource, `run_sql` behind `--expose-run-sql`)
 - [x] Multi-turn chat (Streamlit Chat tab + MCP `conversation_id`)
+- [x] Lazy schema via tool-calling (`list_tables` / `describe_table` tools, agent loop, auto-fallback to injection)
 
 ### Deferred to post-v1
 

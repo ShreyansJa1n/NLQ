@@ -29,6 +29,7 @@ def _build_pipeline(
     db: Path,
     limit: int | None,
     paraphrase: bool | None = None,
+    lazy_schema: bool | None = None,
 ) -> tuple[Pipeline, str]:
     settings = load_settings()
     settings.db.path = db
@@ -49,7 +50,7 @@ def _build_pipeline(
         paraphrase_max_output_tokens=gen.paraphrase_max_output_tokens,
         auto_limit=gen.auto_limit,
         num_few_shot=None if gen.num_few_shot == -1 else gen.num_few_shot,
-        lazy_schema=gen.lazy_schema,
+        lazy_schema=gen.lazy_schema if lazy_schema is None else lazy_schema,
         lazy_max_iterations=gen.lazy_max_iterations,
     )
     return pipe, provider.name
@@ -86,6 +87,17 @@ def query(
             help="Skip the NL-explain-the-SQL step (saves one LLM call).",
         ),
     ] = False,
+    lazy_schema: Annotated[
+        bool | None,
+        typer.Option(
+            "--lazy-schema/--no-lazy-schema",
+            help=(
+                "Use tool-calling to look up the schema on demand instead of "
+                "injecting it into every prompt. Falls back to injection if "
+                "the provider/model doesn't support tools. Overrides config."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Ask the database a question in plain English."""
     from rich.prompt import Prompt
@@ -93,7 +105,12 @@ def query(
     from .generator import Answer, CannotAnswer, Clarify
 
     effective_limit = None if limit == 0 else limit
-    pipe, provider_name = _build_pipeline(db, effective_limit, paraphrase=not no_paraphrase)
+    pipe, provider_name = _build_pipeline(
+        db,
+        effective_limit,
+        paraphrase=not no_paraphrase,
+        lazy_schema=lazy_schema,
+    )
 
     def _confirm(sql: str, paraphrase: str | None) -> bool:
         _console.print(
@@ -171,6 +188,18 @@ def query(
             _console.print(
                 f"[dim](auto-LIMIT injected; max_rows={pipe._max_rows})[/dim]"
             )
+        if output.lazy_attempted:
+            if output.lazy_fallback_reason:
+                _console.print(
+                    f"[dim](lazy schema attempted but fell back: "
+                    f"{output.lazy_fallback_reason})[/dim]"
+                )
+            elif output.agent_run is not None:
+                trace = ", ".join(i.name for i in output.agent_run.invocations)
+                _console.print(
+                    f"[dim](lazy schema: {output.agent_run.iterations} "
+                    f"round-trip(s) — tools: {trace or '(none)'})[/dim]"
+                )
 
 
 @app.command(name="schema")
@@ -207,7 +236,8 @@ def config_cmd() -> None:
             f"timeout_s={s.limits.timeout_s}, max_prompt_tokens={s.limits.max_prompt_tokens}\n"
             f"[bold]generation[/bold]: temperature={g.temperature}, max_tokens={g.max_output_tokens}, "
             f"paraphrase={g.paraphrase} (t={g.paraphrase_temperature}, tok={g.paraphrase_max_output_tokens}), "
-            f"auto_limit={g.auto_limit}, few_shot={g.num_few_shot}\n"
+            f"auto_limit={g.auto_limit}, few_shot={g.num_few_shot}, "
+            f"lazy_schema={g.lazy_schema} (max_iter={g.lazy_max_iterations})\n"
             f"[bold]log_dir[/bold]:    {s.log_dir}",
             title="[bold]nl-db config[/bold]",
             border_style="cyan",
