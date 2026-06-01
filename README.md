@@ -26,6 +26,9 @@ uv run nl-db query "list the 5 most recent transactions" --db path/to/your.db
 
 # Non-interactive JSON
 uv run nl-db query "total spend by category" --db path/to/your.db --json --no-confirm
+
+# Tool-calling mode (LLM looks up schema on demand instead of injection)
+uv run nl-db query "how much did Alice spend?" --db path/to/your.db --lazy-schema
 ```
 
 Every query:
@@ -42,9 +45,16 @@ Writes (`INSERT`/`UPDATE`/`DELETE`/`DROP`/`ALTER`/`TRUNCATE`) are refused unless
 
 If the database can't answer a question, NLQ says so plainly (`CANNOT_ANSWER`) instead of hallucinating SQL. Ambiguous questions trigger a `CLARIFY` follow-up so the LLM can ask you a question back.
 
+### Lazy schema (tool-calling)
+
+By default NLQ injects the full schema into every prompt. For large schemas this gets expensive. With `--lazy-schema` (CLI) or the sidebar toggle (UI), the LLM gets two tools — `list_tables()` and `describe_table(name)` — and looks up only what it needs. Three-state capability:
+
+- **Anthropic / OpenAI** — known to support tools, just works.
+- **OpenAI-compatible** (Ollama, vLLM, Apple Intelligence shim, …) — depends on the shim + model. NLQ attempts the lazy path and **falls back to schema injection** if the shim rejects tools or the model ignores them. The fallback reason is shown in the CLI status line and the Streamlit "How I answered" expander.
+
 ## Streamlit playground
 
-A web UI for experimentation — edit every config knob (provider, model, key, DB path, temperature, max tokens, paraphrase on/off, auto-LIMIT, few-shot count, …), inspect the schema, ask questions, see results inline, and dig into the raw HTTP request/response with the debug toggle.
+A web UI for experimentation — edit every config knob (provider, model, key, DB path, temperature, max tokens, paraphrase on/off, auto-LIMIT, few-shot count, **lazy schema**, …), inspect the schema, ask questions, see results inline, and dig into the raw HTTP request/response with the debug toggle.
 
 ```bash
 uv run nl-db-ui
@@ -224,7 +234,7 @@ Key invariants:
 
 ```bash
 uv sync
-uv run pytest                          # 132 tests, <1s
+uv run pytest                          # 164 tests, ~1s
 uv run ruff check
 uv run mypy src/
 
